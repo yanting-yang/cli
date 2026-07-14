@@ -80,10 +80,7 @@ def print_summary(title, active_nodes, total, gpu_types):
     print()
 
 
-EXCLUDE_STATES = ["PLANNED", "DRAIN", "MAINTENANCE", "RESERVED", "ALLOCATED", "DOWN"]
-
-
-def main():
+def main(exclude_states=None):
     try:
         result = subprocess.run(
             ["scontrol", "show", "node"], capture_output=True, text=True, check=True
@@ -97,8 +94,11 @@ def main():
 
     nodes = parse_nodes(result.stdout)
 
-    exclude_pattern = "|".join(EXCLUDE_STATES)
-    active_nodes = [n for n in nodes if not re.search(exclude_pattern, n["state"], re.IGNORECASE)]
+    if exclude_states:
+        exclude_pattern = "|".join(exclude_states)
+        active_nodes = [n for n in nodes if not re.search(exclude_pattern, n["state"], re.IGNORECASE)]
+    else:
+        active_nodes = list(nodes)
 
     all_hw    = defaultdict(list)
     active_hw = defaultdict(list)
