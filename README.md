@@ -10,6 +10,19 @@ Cluster inspection utilities for Slurm. Currently provides one command, `node_st
 
 ## Usage
 
+### Run without cloning (uvx)
+
+Run `node_state` directly from this repository with [uvx](https://docs.astral.sh/uv/guides/tools/) — no clone or install needed:
+
+```bash
+uvx --from git+https://github.com/yanting-yang/cli node_state
+
+# Options work the same way
+uvx --from git+https://github.com/yanting-yang/cli node_state -x
+```
+
+### Run from a local checkout
+
 ```bash
 # Summarize all nodes (no state filtering)
 uv run node_state
