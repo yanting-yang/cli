@@ -34,10 +34,32 @@ uv run node_state -x
 uv run node_state -x DOWN DRAIN
 ```
 
-`node_state` runs `scontrol show node`, groups nodes by hardware type (CPU count, memory, GPU configuration), and prints a per-type table of total, allocated, and available resources:
+### Run as a Slurm batch job
+
+```bash
+sbatch node_state.sbatch
+sbatch node_state.sbatch -x DOWN DRAIN
+```
+
+The report is written to Slurm's standard `slurm-<job-id>.out` file. Arguments
+after the script name are forwarded to `node_state`.
+
+At startup, `node_state` reads the cluster name from `scontrol show config` and runs
+the implementation for that cluster. Currently supported:
+
+- `vulcan` - groups nodes by CPU count, memory in whole GB, and GPU configuration
+
+After the resource summary, the Vulcan implementation runs one `sbatch --test-only`
+request per GPU node for `aip-xli135`, one L40S GPU, 16 CPUs, 128 GB of memory,
+and three hours. It prints a feasibility row for every GPU node, followed by a
+resource table containing only the GPU nodes that can run the request. Test-only
+requests are not submitted as jobs.
+
+It then prints a per-type table of total, allocated, and available resources:
 
 ```
 224 CPUs / 2011 GB / 16x gpu / 4x nvidia_b200 / ... (1/1):
+States: MIXED=1
 Resource            | Total | Allocated | Available
 ---------------------------------------------------
 CPU (cores)         | 224   | 88        | 136
