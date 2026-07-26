@@ -3,48 +3,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from unittest.mock import Mock, patch
 
-from node_state.clusters import vulcan
-
-
-class HardwareGroupingTests(unittest.TestCase):
-    def test_identifies_gpu_nodes(self):
-        self.assertTrue(vulcan.is_gpu_node({"cfg_gpus": {"gpu": 4, "l40s": 4}}))
-        self.assertFalse(vulcan.is_gpu_node({"cfg_gpus": {}}))
-
-    def test_groups_small_real_memory_differences_by_whole_gibibyte(self):
-        base_node = {
-            "cpu_tot": 64,
-            "mem_tot": 515472,
-            "cfg_gpus": {"gpu": 4, "l40s": 4},
-        }
-        nearly_identical_node = {**base_node, "mem_tot": 515478}
-
-        key = vulcan.node_hw_key(base_node)
-
-        self.assertEqual(key, vulcan.node_hw_key(nearly_identical_node))
-        self.assertEqual(vulcan.hw_key_label(key), "64 CPUs / 503 GB / 4x gpu / 4x l40s")
-
-    def test_keeps_different_whole_gibibyte_values_separate(self):
-        smaller_node = {"cpu_tot": 64, "mem_tot": 515472, "cfg_gpus": {}}
-        larger_node = {"cpu_tot": 64, "mem_tot": 516096, "cfg_gpus": {}}
-
-        self.assertNotEqual(
-            vulcan.node_hw_key(smaller_node), vulcan.node_hw_key(larger_node)
-        )
-
-
-class StateCountTests(unittest.TestCase):
-    def test_formats_unique_states_with_counts(self):
-        nodes = [
-            {"state": "MIXED"},
-            {"state": "IDLE"},
-            {"state": "MIXED"},
-        ]
-
-        self.assertEqual(vulcan.format_state_counts(nodes), "IDLE=1, MIXED=2")
-
-    def test_formats_no_states_as_an_empty_string(self):
-        self.assertEqual(vulcan.format_state_counts([]), "")
+from node_state.clusters import common, vulcan
 
 
 class SbatchTestTests(unittest.TestCase):
@@ -64,17 +23,17 @@ class SbatchTestTests(unittest.TestCase):
         self.assertIn("Result", output.getvalue())
 
     def test_builds_cluster_request_for_node(self):
-        script = vulcan.build_sbatch_test_script("rack15-12")
+        directives = vulcan.build_directives("rack15-12")
 
-        self.assertIn("#SBATCH --test-only", script)
-        self.assertIn("#SBATCH --account=aip-xli135", script)
-        self.assertIn("#SBATCH --gres=gpu:l40s:1", script)
-        self.assertIn("#SBATCH --cpus-per-task=16", script)
-        self.assertIn("#SBATCH --mem=128G", script)
-        self.assertIn("#SBATCH --time=3:00:00", script)
-        self.assertIn("#SBATCH --nodelist=rack15-12", script)
+        self.assertIn("--test-only", directives)
+        self.assertIn("--account=aip-xli135", directives)
+        self.assertIn("--gres=gpu:l40s:1", directives)
+        self.assertIn("--cpus-per-task=16", directives)
+        self.assertIn("--mem=128G", directives)
+        self.assertIn("--time=3:00:00", directives)
+        self.assertIn("--nodelist=rack15-12", directives)
 
-    @patch.object(vulcan.subprocess, "run")
+    @patch.object(common.subprocess, "run")
     def test_extracts_estimated_start_time(self, run_mock):
         run_mock.return_value = Mock(
             stdout=(
@@ -89,8 +48,9 @@ class SbatchTestTests(unittest.TestCase):
 
         self.assertEqual(result["start_time"], "2026-07-25T19:06:59")
         self.assertEqual(result["result"], "Runnable")
+        self.assertEqual(result["node"], "rack15-12")
 
-    @patch.object(vulcan.subprocess, "run")
+    @patch.object(common.subprocess, "run")
     def test_reports_infeasible_node(self, run_mock):
         run_mock.return_value = Mock(
             stdout="allocation failure: Requested node configuration is not available\n",

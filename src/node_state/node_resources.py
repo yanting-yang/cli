@@ -1,10 +1,11 @@
 import re
 import subprocess
 
-from .clusters import vulcan
+from .clusters import rcl, vulcan
 
 
 CLUSTER_RUNNERS = {
+    "rcl": rcl.main,
     "vulcan": vulcan.main,
 }
 
