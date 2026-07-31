@@ -8,10 +8,10 @@ CLUSTER_RUNNERS = {
 }
 
 
-def main(cluster_name=None):
+def main(cluster_name=None, **runner_options):
     runner = (
         fallback.main
         if cluster_name is None
         else CLUSTER_RUNNERS[cluster_name.casefold()]
     )
-    runner()
+    runner(**runner_options)

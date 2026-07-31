@@ -29,13 +29,19 @@ def normalize_node(node):
     return node
 
 
-def build_directives(gpu=None, gpu_count=1, time_limit=PROBE_TIMES[0]):
+def build_directives(
+    gpu=None,
+    gpu_count=1,
+    time_limit=PROBE_TIMES[0],
+    probe_cpus=PROBE_CPUS,
+    probe_ram=PROBE_MEM,
+):
     directives = ["--test-only"]
     if gpu:
         directives.append(f"--gres=gpu:{gpu}:{gpu_count}")
     directives += [
-        f"--cpus-per-task={PROBE_CPUS}",
-        f"--mem={PROBE_MEM}",
+        f"--cpus-per-task={probe_cpus}",
+        f"--mem={probe_ram}",
         f"--time={time_limit}",
     ]
     return directives
@@ -48,7 +54,11 @@ def clean_result(text):
     return text.strip(" .")
 
 
-def run_probes(gpu_capacities):
+def run_probes(
+    gpu_capacities,
+    probe_cpus=PROBE_CPUS,
+    probe_ram=PROBE_MEM,
+):
     requests = [
         (gpu, count, f"{count}x {gpu}")
         for gpu, capacity in sorted(gpu_capacities.items())
@@ -60,7 +70,13 @@ def run_probes(gpu_capacities):
     for gpu, count, label in requests:
         for time_limit in PROBE_TIMES:
             result = common.run_sbatch_test(
-                build_directives(gpu, count, time_limit)
+                build_directives(
+                    gpu,
+                    count,
+                    time_limit,
+                    probe_cpus=probe_cpus,
+                    probe_ram=probe_ram,
+                )
             )
             result["label"] = label
             result["time"] = time_limit
@@ -77,7 +93,13 @@ def run_probes(gpu_capacities):
 
     for gpu, count, label in interactive_requests:
         result = common.run_srun_test(
-            build_directives(gpu, count, INTERACTIVE_TIME)
+            build_directives(
+                gpu,
+                count,
+                INTERACTIVE_TIME,
+                probe_cpus=probe_cpus,
+                probe_ram=probe_ram,
+            )
         )
         result["label"] = label
         result["time"] = INTERACTIVE_TIME
@@ -86,13 +108,28 @@ def run_probes(gpu_capacities):
     return results
 
 
-def print_probe_results(results):
+def print_probe_results(
+    results,
+    probe_cpus=PROBE_CPUS,
+    probe_ram=PROBE_MEM,
+    sort_by_start=False,
+):
     runnable = sum(result["start_time"] is not None for result in results)
     print(
-        f"Job feasibility (--test-only, {PROBE_CPUS} CPUs, "
-        f"{PROBE_MEM}):"
+        f"Job feasibility (--test-only, {probe_cpus} CPUs, "
+        f"{probe_ram}):"
     )
     print(f"Runnable: {runnable}/{len(results)}")
+
+    displayed_results = results
+    if sort_by_start:
+        displayed_results = sorted(
+            results,
+            key=lambda result: (
+                result["start_time"] is None,
+                result["start_time"] or "",
+            ),
+        )
 
     rows = [
         (
@@ -103,7 +140,7 @@ def print_probe_results(results):
             result["start_time"] or "-",
             result["partition"] or "-",
         )
-        for result in results
+        for result in displayed_results
     ]
     common.print_table(
         ["Request", "Time", "Command", "Can run", "Estimated start", "Partition"],
@@ -122,7 +159,11 @@ def print_probe_results(results):
         print()
 
 
-def main():
+def main(
+    probe_cpus=PROBE_CPUS,
+    probe_ram=PROBE_MEM,
+    sort_by_start=False,
+):
     nodes = common.fetch_nodes()
     if nodes is None:
         return
@@ -144,4 +185,14 @@ def main():
         gpu: max(node["cfg_gpus"].get(gpu, 0) for node in nodes)
         for gpu in gpu_types
     }
-    print_probe_results(run_probes(gpu_capacities))
+    results = run_probes(
+        gpu_capacities,
+        probe_cpus=probe_cpus,
+        probe_ram=probe_ram,
+    )
+    print_probe_results(
+        results,
+        probe_cpus=probe_cpus,
+        probe_ram=probe_ram,
+        sort_by_start=sort_by_start,
+    )

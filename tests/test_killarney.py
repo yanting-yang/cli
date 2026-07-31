@@ -46,8 +46,36 @@ class BuildDirectivesTests(unittest.TestCase):
             any(item.startswith(("--partition", "-p")) for item in directives)
         )
 
+    def test_uses_custom_cpu_and_ram(self):
+        directives = killarney.build_directives(
+            probe_cpus=12,
+            probe_ram="96G",
+        )
+
+        self.assertIn("--cpus-per-task=12", directives)
+        self.assertIn("--mem=96G", directives)
+
 
 class RunProbesTests(unittest.TestCase):
+    @patch.object(common, "run_srun_test")
+    @patch.object(common, "run_sbatch_test")
+    def test_applies_custom_cpu_and_ram_to_every_probe(
+        self, sbatch_mock, srun_mock
+    ):
+        result = {
+            "start_time": "2026-07-30T20:00:00",
+            "partition": "test",
+            "result": "Runnable",
+        }
+        sbatch_mock.return_value = result
+        srun_mock.return_value = result
+
+        killarney.run_probes({}, probe_cpus=12, probe_ram="96G")
+
+        for call in sbatch_mock.call_args_list + srun_mock.call_args_list:
+            self.assertIn("--cpus-per-task=12", call.args[0])
+            self.assertIn("--mem=96G", call.args[0])
+
     @patch.object(common, "run_srun_test")
     @patch.object(common, "run_sbatch_test")
     def test_runs_every_gpu_count_and_time_in_one_matrix(
@@ -132,7 +160,75 @@ class RunProbesTests(unittest.TestCase):
         )
 
 
+class MainTests(unittest.TestCase):
+    def test_propagates_feasibility_options(self):
+        with (
+            patch.object(common, "fetch_nodes", return_value=[]),
+            patch.object(killarney, "run_probes", return_value=[]) as run_mock,
+            patch.object(killarney, "print_probe_results") as print_mock,
+        ):
+            killarney.main(
+                probe_cpus=12,
+                probe_ram="96G",
+                sort_by_start=True,
+            )
+
+        run_mock.assert_called_once_with(
+            {},
+            probe_cpus=12,
+            probe_ram="96G",
+        )
+        print_mock.assert_called_once_with(
+            [],
+            probe_cpus=12,
+            probe_ram="96G",
+            sort_by_start=True,
+        )
+
+
 class ProbeReportTests(unittest.TestCase):
+    def test_sorts_by_estimated_start_with_blocked_requests_last(self):
+        results = [
+            {
+                "label": "late request",
+                "time": "3:00:00",
+                "command": "sbatch",
+                "start_time": "2026-08-02T12:00:00",
+                "partition": "late",
+                "result": "Runnable",
+            },
+            {
+                "label": "unrunnable request",
+                "time": "3:00:00",
+                "command": "sbatch",
+                "start_time": None,
+                "partition": None,
+                "result": "Unavailable",
+            },
+            {
+                "label": "early request",
+                "time": "3:00:00",
+                "command": "sbatch",
+                "start_time": "2026-08-01T12:00:00",
+                "partition": "early",
+                "result": "Runnable",
+            },
+        ]
+        output = StringIO()
+
+        with redirect_stdout(output):
+            killarney.print_probe_results(
+                results,
+                probe_cpus=12,
+                probe_ram="96G",
+                sort_by_start=True,
+            )
+
+        text = output.getvalue()
+        self.assertIn("12 CPUs, 96G", text)
+        self.assertLess(text.index("early request"), text.index("late request"))
+        self.assertLess(text.index("late request"), text.index("unrunnable request"))
+
     def test_prints_all_results_in_one_table_with_a_time_column(self):
         results = [
             {

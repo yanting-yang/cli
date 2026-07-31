@@ -18,7 +18,7 @@ Run `node_state` directly from this repository with [uvx](https://docs.astral.sh
 # Run the generic fallback
 uvx --from git+https://github.com/yanting-yang/cli node_state
 
-# Run a cluster-specific reporter
+# Run a cluster subcommand
 uvx --from git+https://github.com/yanting-yang/cli node_state killarney
 ```
 
@@ -28,7 +28,7 @@ uvx --from git+https://github.com/yanting-yang/cli node_state killarney
 # Summarize all nodes with the generic fallback
 uv run node_state
 
-# Use a cluster-specific reporter
+# Use a cluster subcommand
 uv run node_state killarney
 ```
 
@@ -42,10 +42,11 @@ The report is written to Slurm's standard `slurm-<job-id>.out` file.
 
 ## Supported clusters
 
-With no argument, `node_state` runs the generic fallback. Pass a cluster name to
-run its specialized reporter, for example `node_state killarney`. Every reporter
-groups nodes by CPU count, memory in whole GB, and GPU configuration, then prints
-a per-type table of total, allocated, and available resources. Supported names are:
+With no subcommand, `node_state` runs the generic fallback. Use a cluster
+subcommand to run its specialized reporter, for example `node_state killarney`.
+Every reporter groups nodes by CPU count, memory in whole GB, and GPU
+configuration, then prints a per-type table of total, allocated, and available
+resources. Supported subcommands are:
 
 - `killarney` — multi-node L40S and H100 cluster
 - `vulcan` — multi-node L40S cluster
@@ -69,6 +70,16 @@ hardware and duration partition. It also tests interactive `srun` feasibility
 for 1-4 L40Ss and one CPU-only request at 3 hours. Both commands use
 `--test-only`, so no job starts. All results share one table whose `Command`,
 `Time`, selected partition, and estimated start columns make the routing visible.
+
+The probes request 4 CPUs and 32 GB of memory by default. Override those resources
+and sort the table from earliest to latest estimated start with:
+
+```bash
+uv run node_state killarney --cpus-per-task 12 --mem 96G --sort-by-start
+```
+
+Rows without an estimated start are placed after runnable rows when sorting is
+enabled.
 
 ### vulcan
 
