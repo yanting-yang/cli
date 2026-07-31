@@ -1,4 +1,5 @@
 import unittest
+from argparse import Namespace
 from contextlib import redirect_stdout
 from io import StringIO
 from unittest.mock import patch
@@ -6,40 +7,24 @@ from unittest.mock import patch
 from node_state.clusters import common, killarney
 
 
-class TypedGpusTests(unittest.TestCase):
-    def test_drops_the_rollup_when_a_model_count_exists(self):
-        self.assertEqual(
-            killarney.typed_gpus({"gpu": 4, "l40s": 4}),
-            {"l40s": 4},
-        )
-
-    def test_keeps_the_rollup_when_it_is_the_only_gpu_information(self):
-        self.assertEqual(killarney.typed_gpus({"gpu": 4}), {"gpu": 4})
-
-    def test_normalizes_configured_and_allocated_gpus(self):
-        node = killarney.normalize_node(
-            {
-                "cfg_gpus": {"gpu": 8, "h100": 8},
-                "alloc_gpus": {"gpu": 3, "h100": 3},
-            }
-        )
-
-        self.assertEqual(node["cfg_gpus"], {"h100": 8})
-        self.assertEqual(node["alloc_gpus"], {"h100": 3})
-
-
 class BuildDirectivesTests(unittest.TestCase):
     def test_builds_a_gpu_count_and_time_probe(self):
-        directives = killarney.build_directives("h100", 8, "7-00:00:00")
+        directives = killarney.build_directives(
+            "h100",
+            8,
+            "7-00:00:00",
+            cpus_per_task=4,
+            mem="32G",
+        )
 
         self.assertIn("--test-only", directives)
         self.assertIn("--gres=gpu:h100:8", directives)
-        self.assertIn(f"--cpus-per-task={killarney.PROBE_CPUS}", directives)
-        self.assertIn(f"--mem={killarney.PROBE_MEM}", directives)
+        self.assertIn("--cpus-per-task=4", directives)
+        self.assertIn("--mem=32G", directives)
         self.assertIn("--time=7-00:00:00", directives)
 
     def test_omits_gpu_and_partition_for_a_cpu_only_probe(self):
-        directives = killarney.build_directives()
+        directives = killarney.build_directives(cpus_per_task=4, mem="32G")
 
         self.assertFalse(any(item.startswith("--gres") for item in directives))
         self.assertFalse(
@@ -48,8 +33,8 @@ class BuildDirectivesTests(unittest.TestCase):
 
     def test_uses_custom_cpu_and_ram(self):
         directives = killarney.build_directives(
-            probe_cpus=12,
-            probe_ram="96G",
+            cpus_per_task=12,
+            mem="96G",
         )
 
         self.assertIn("--cpus-per-task=12", directives)
@@ -59,9 +44,7 @@ class BuildDirectivesTests(unittest.TestCase):
 class RunProbesTests(unittest.TestCase):
     @patch.object(common, "run_srun_test")
     @patch.object(common, "run_sbatch_test")
-    def test_applies_custom_cpu_and_ram_to_every_probe(
-        self, sbatch_mock, srun_mock
-    ):
+    def test_applies_custom_cpu_and_ram_to_every_probe(self, sbatch_mock, srun_mock):
         result = {
             "start_time": "2026-07-30T20:00:00",
             "partition": "test",
@@ -70,26 +53,33 @@ class RunProbesTests(unittest.TestCase):
         sbatch_mock.return_value = result
         srun_mock.return_value = result
 
-        killarney.run_probes({}, probe_cpus=12, probe_ram="96G")
+        results = killarney.run_probes({}, cpus_per_task=12, mem="96G")
 
         for call in sbatch_mock.call_args_list + srun_mock.call_args_list:
             self.assertIn("--cpus-per-task=12", call.args[0])
             self.assertIn("--mem=96G", call.args[0])
+        self.assertNotIn("label", result)
+        self.assertEqual(
+            [probe["command"] for probe in results],
+            ["sbatch"] * len(killarney.PROBE_TIMES) + ["srun"],
+        )
 
     @patch.object(common, "run_srun_test")
     @patch.object(common, "run_sbatch_test")
-    def test_runs_every_gpu_count_and_time_in_one_matrix(
-        self, sbatch_mock, srun_mock
-    ):
-        result = lambda _directives: {
+    def test_runs_every_gpu_count_and_time_in_one_matrix(self, sbatch_mock, srun_mock):
+        runnable_result = {
             "start_time": "2026-07-30T20:00:00",
             "partition": "test",
             "result": "Runnable",
         }
-        sbatch_mock.side_effect = result
-        srun_mock.side_effect = result
+        sbatch_mock.return_value = runnable_result
+        srun_mock.return_value = runnable_result
 
-        results = killarney.run_probes({"h100": 8, "l40s": 4})
+        results = killarney.run_probes(
+            {"h100": 8, "l40s": 4},
+            cpus_per_task=4,
+            mem="32G",
+        )
 
         expected_gpu_requests = {
             (f"{count}x {gpu}", time_limit)
@@ -127,20 +117,13 @@ class RunProbesTests(unittest.TestCase):
         self.assertEqual(
             {
                 (
-                    next(
-                        item for item in call.args[0] if item.startswith("--gres=")
-                    ),
-                    next(
-                        item for item in call.args[0] if item.startswith("--time=")
-                    ),
+                    next(item for item in call.args[0] if item.startswith("--gres=")),
+                    next(item for item in call.args[0] if item.startswith("--time=")),
                 )
                 for call in srun_mock.call_args_list
                 if any(item.startswith("--gres=") for item in call.args[0])
             },
-            {
-                (f"--gres=gpu:l40s:{count}", "--time=3:00:00")
-                for count in range(1, 5)
-            },
+            {(f"--gres=gpu:l40s:{count}", "--time=3:00:00") for count in range(1, 5)},
         )
         cpu_srun_directives = [
             call.args[0]
@@ -168,20 +151,22 @@ class MainTests(unittest.TestCase):
             patch.object(killarney, "print_probe_results") as print_mock,
         ):
             killarney.main(
-                probe_cpus=12,
-                probe_ram="96G",
-                sort_by_start=True,
+                Namespace(
+                    cpus_per_task=12,
+                    mem="96G",
+                    sort_by_start=True,
+                )
             )
 
         run_mock.assert_called_once_with(
             {},
-            probe_cpus=12,
-            probe_ram="96G",
+            cpus_per_task=12,
+            mem="96G",
         )
         print_mock.assert_called_once_with(
             [],
-            probe_cpus=12,
-            probe_ram="96G",
+            cpus_per_task=12,
+            mem="96G",
             sort_by_start=True,
         )
 
@@ -219,8 +204,8 @@ class ProbeReportTests(unittest.TestCase):
         with redirect_stdout(output):
             killarney.print_probe_results(
                 results,
-                probe_cpus=12,
-                probe_ram="96G",
+                cpus_per_task=12,
+                mem="96G",
                 sort_by_start=True,
             )
 
@@ -243,7 +228,11 @@ class ProbeReportTests(unittest.TestCase):
         output = StringIO()
 
         with redirect_stdout(output):
-            killarney.print_probe_results(results)
+            killarney.print_probe_results(
+                results,
+                cpus_per_task=4,
+                mem="32G",
+            )
 
         text = output.getvalue()
         self.assertRegex(text, r"Request\s+\| Time\s+\| Command\s+\| Can run")

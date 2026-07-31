@@ -2,7 +2,6 @@
 
 from . import common
 
-
 SBATCH_ACCOUNT = "aip-xli135"
 
 
@@ -20,8 +19,7 @@ def build_directives(node_name):
 
 def run_sbatch_test(node_name):
     result = common.run_sbatch_test(build_directives(node_name))
-    result["node"] = node_name
-    return result
+    return {**result, "node": node_name}
 
 
 def print_sbatch_test_results(results):
@@ -49,7 +47,9 @@ def print_sbatch_test_results(results):
     print()
 
 
-def main():
+def main(args):
+    del args
+
     nodes = common.fetch_nodes()
     if nodes is None:
         return
@@ -75,4 +75,6 @@ def main():
     }
     runnable_nodes = [node for node in gpu_nodes if node["name"] in runnable_names]
     gpu_types = sorted({gpu for node in gpu_nodes for gpu in node["cfg_gpus"]})
-    common.print_summary("Runnable GPU nodes", runnable_nodes, len(gpu_nodes), gpu_types)
+    common.print_summary(
+        "Runnable GPU nodes", runnable_nodes, len(gpu_nodes), gpu_types
+    )

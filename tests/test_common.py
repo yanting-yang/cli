@@ -4,7 +4,6 @@ from unittest.mock import Mock, patch
 
 from node_state.clusters import common
 
-
 NODE_BLOCK = """NodeName=rcl-nv2.ece.ubc.ca Arch=x86_64 CoresPerSocket=56
    CPUAlloc=88 CPUEfctv=192 CPUTot=224 CPULoad=18.41
    RealMemory=2060000 AllocMem=706560 FreeMem=224124 Sockets=2 Boards=1
@@ -23,6 +22,38 @@ class ParseTresGpusTests(unittest.TestCase):
 
     def test_returns_empty_mapping_without_gpus(self):
         self.assertEqual(common.parse_tres_gpus("cpu=48,mem=257000M"), {})
+
+
+class GpuRollupTests(unittest.TestCase):
+    def test_drops_the_rollup_when_per_model_counts_exist(self):
+        gpus = {
+            "gpu": 16,
+            "nvidia_b200": 4,
+            "nvidia_b200_2g.45gb": 8,
+            "nvidia_b200_3g.90gb": 4,
+        }
+
+        self.assertEqual(
+            common.remove_untyped_gpu_rollup(gpus),
+            {"nvidia_b200": 4, "nvidia_b200_2g.45gb": 8, "nvidia_b200_3g.90gb": 4},
+        )
+
+    def test_keeps_the_rollup_when_it_is_the_only_information(self):
+        self.assertEqual(common.remove_untyped_gpu_rollup({"gpu": 4}), {"gpu": 4})
+
+    def test_leaves_cpu_only_nodes_empty(self):
+        self.assertEqual(common.remove_untyped_gpu_rollup({}), {})
+
+    def test_normalizes_both_configured_and_allocated_gpus(self):
+        node = common.normalize_gpu_rollups(
+            {
+                "cfg_gpus": {"gpu": 16, "nvidia_b200": 4},
+                "alloc_gpus": {"gpu": 8, "nvidia_b200": 3},
+            }
+        )
+
+        self.assertEqual(node["cfg_gpus"], {"nvidia_b200": 4})
+        self.assertEqual(node["alloc_gpus"], {"nvidia_b200": 3})
 
 
 class ParseNodesTests(unittest.TestCase):
@@ -65,7 +96,9 @@ class HardwareGroupingTests(unittest.TestCase):
         key = common.node_hw_key(base_node)
 
         self.assertEqual(key, common.node_hw_key(nearly_identical_node))
-        self.assertEqual(common.hw_key_label(key), "64 CPUs / 503 GB / 4x gpu / 4x l40s")
+        self.assertEqual(
+            common.hw_key_label(key), "64 CPUs / 503 GB / 4x gpu / 4x l40s"
+        )
 
     def test_keeps_different_whole_gibibyte_values_separate(self):
         smaller_node = {"cpu_tot": 64, "mem_tot": 515472, "cfg_gpus": {}}
@@ -143,9 +176,7 @@ class ParseTresValuesTests(unittest.TestCase):
     def test_keeps_tres_names_containing_colons_intact(self):
         values = common.parse_tres_values("cpu=8,mem=65536,gres/gpu:nvidia_b200=1")
 
-        self.assertEqual(
-            values, {"cpu": 8, "mem": 65536, "gres/gpu:nvidia_b200": 1}
-        )
+        self.assertEqual(values, {"cpu": 8, "mem": 65536, "gres/gpu:nvidia_b200": 1})
 
     def test_ignores_empty_and_non_numeric_entries(self):
         self.assertEqual(common.parse_tres_values(""), {})
@@ -268,23 +299,23 @@ class UserJobCountTests(unittest.TestCase):
             {"running": 0, "pending": 0, "total": 0},
         )
 
-    @patch.object(common.subprocess, "run", side_effect=FileNotFoundError)
-    def test_reports_none_when_squeue_is_missing(self, _run_mock):
-        self.assertIsNone(common.fetch_user_job_counts("me"))
+    def test_reports_none_when_squeue_is_missing(self):
+        with patch.object(common.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertIsNone(common.fetch_user_job_counts("me"))
 
 
 class FetchAssocMgrTests(unittest.TestCase):
-    @patch.object(common.subprocess, "run", side_effect=FileNotFoundError)
-    def test_reports_none_when_scontrol_is_missing(self, _run_mock):
-        self.assertIsNone(common.fetch_assoc_mgr())
+    def test_reports_none_when_scontrol_is_missing(self):
+        with patch.object(common.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertIsNone(common.fetch_assoc_mgr())
 
-    @patch.object(
-        common.subprocess,
-        "run",
-        side_effect=subprocess.CalledProcessError(1, "scontrol"),
-    )
-    def test_reports_none_when_the_command_fails(self, _run_mock):
-        self.assertIsNone(common.fetch_assoc_mgr())
+    def test_reports_none_when_the_command_fails(self):
+        with patch.object(
+            common.subprocess,
+            "run",
+            side_effect=subprocess.CalledProcessError(1, "scontrol"),
+        ):
+            self.assertIsNone(common.fetch_assoc_mgr())
 
 
 class RunSbatchTestTests(unittest.TestCase):
@@ -333,9 +364,9 @@ class RunSbatchTestTests(unittest.TestCase):
             "#!/bin/bash\n#SBATCH --test-only\n#SBATCH --mem=32G\n",
         )
 
-    @patch.object(common.subprocess, "run", side_effect=FileNotFoundError)
-    def test_reports_missing_sbatch(self, _run_mock):
-        self.assertEqual(common.run_sbatch_test([])["result"], "'sbatch' not found")
+    def test_reports_missing_sbatch(self):
+        with patch.object(common.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertEqual(common.run_sbatch_test([])["result"], "'sbatch' not found")
 
 
 class RunSrunTestTests(unittest.TestCase):

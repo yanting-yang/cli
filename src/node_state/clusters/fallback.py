@@ -2,11 +2,12 @@
 
 from . import common
 
-
 CPU_KEY = "cpu_efctv"
 
 
-def main():
+def main(args):
+    del args
+
     nodes = common.fetch_nodes()
     if nodes is None:
         return

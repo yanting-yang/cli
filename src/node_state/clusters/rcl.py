@@ -2,7 +2,6 @@
 
 from . import common
 
-
 # Probe size for the feasibility check. Kept small on purpose: the point is to
 # test GPU/partition availability, not to bump into per-account job caps.
 PROBE_CPUS = 4
@@ -11,22 +10,6 @@ PROBE_TIME = "1:00:00"
 
 # rcl reserves cores via CoreSpecCount, so CPUTot overstates what jobs can get.
 CPU_KEY = "cpu_efctv"
-
-
-def typed_gpus(gpu_counts):
-    """Drop the untyped `gres/gpu` rollup when per-model entries are present.
-
-    rcl advertises both `gres/gpu=16` and the per-model counts that sum to it,
-    so keeping the rollup would double-count every GPU.
-    """
-    typed = {label: count for label, count in gpu_counts.items() if label != "gpu"}
-    return typed if typed else gpu_counts
-
-
-def normalize_node(node):
-    node["cfg_gpus"] = typed_gpus(node["cfg_gpus"])
-    node["alloc_gpus"] = typed_gpus(node["alloc_gpus"])
-    return node
 
 
 def build_directives(gpu=None):
@@ -49,8 +32,7 @@ def build_directives(gpu=None):
 def clean_result(text):
     """Trim sbatch's boilerplate so the reason fits on one line."""
     for prefix in ("sbatch: error: ", "sbatch: "):
-        if text.startswith(prefix):
-            text = text[len(prefix) :]
+        text = text.removeprefix(prefix)
     return text.replace("allocation failure: Unspecified error", "").strip(" .")
 
 
@@ -61,8 +43,7 @@ def run_probes(gpu_types):
     results = []
     for gpu, label in requests:
         result = common.run_sbatch_test(build_directives(gpu))
-        result["label"] = label
-        results.append(result)
+        results.append({**result, "label": label})
     return results
 
 
@@ -151,12 +132,14 @@ def print_account_limits(user):
     print()
 
 
-def main():
+def main(args):
+    del args
+
     nodes = common.fetch_nodes()
     if nodes is None:
         return
 
-    nodes = [normalize_node(node) for node in nodes]
+    nodes = [common.normalize_gpu_rollups(node) for node in nodes]
     hardware = common.group_by_hardware(nodes, CPU_KEY)
 
     for key in sorted(hardware):

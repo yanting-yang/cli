@@ -1,4 +1,5 @@
 import unittest
+from argparse import Namespace
 from contextlib import redirect_stdout
 from io import StringIO
 from unittest.mock import patch
@@ -36,7 +37,7 @@ class FallbackReporterTests(unittest.TestCase):
         output = StringIO()
 
         with redirect_stdout(output):
-            fallback.main()
+            fallback.main(Namespace(cluster=None))
 
         text = output.getvalue()
         self.assertIn("8 CPUs / 16 GB / 1x a100 (2/2)", text)

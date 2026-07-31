@@ -11,8 +11,7 @@ Current commands:
 ## Layout
 
 - [pyproject.toml](pyproject.toml) — project metadata; console scripts live under `[project.scripts]`
-- [src/node_state/cli.py](src/node_state/cli.py) — argument parsing and entry point for `node_state`
-- [src/node_state/node_resources.py](src/node_state/node_resources.py) — fallback and named-cluster dispatch via `CLUSTER_RUNNERS`
+- [src/node_state/cli.py](src/node_state/cli.py) — argument parsing, `CLUSTER_RUNNERS`, dispatch, and entry point for `node_state`
 - [src/node_state/clusters/common.py](src/node_state/clusters/common.py) — `scontrol`/`sbatch` invocation, output parsing, and table rendering shared by all clusters
 - [src/node_state/clusters/fallback.py](src/node_state/clusters/fallback.py) — generic resource summary for unregistered clusters
 - [src/node_state/clusters/killarney.py](src/node_state/clusters/killarney.py) — reporter for `killarney`
@@ -38,12 +37,12 @@ Note the `-t tests` on the test command: `tests/` has no `__init__.py`, so disco
 
 ### Adding a cluster
 
-The no-argument command uses [fallback.py](src/node_state/clusters/fallback.py). Add `src/node_state/clusters/<name>.py` exposing `main()` only when a cluster needs site-specific normalization, probes, or account reporting, then register it in `CLUSTER_RUNNERS` in [node_resources.py](src/node_state/node_resources.py). Registry keys become the accepted positional cluster names. Build on [common.py](src/node_state/clusters/common.py) (`fetch_nodes`, `group_by_hardware`, `print_summary`, `run_sbatch_test`, `run_srun_test`, plus the assoc/QOS helpers below) rather than re-parsing `scontrol` output; cluster modules should hold only what is genuinely site-specific.
+The no-argument command uses [fallback.py](src/node_state/clusters/fallback.py). Add `src/node_state/clusters/<name>.py` exposing `main(args)` only when a cluster needs site-specific normalization, probes, or account reporting, then register it in `CLUSTER_RUNNERS` in [cli.py](src/node_state/cli.py). Registry keys become the accepted subcommand names, and every runner receives the parsed `argparse.Namespace`. Build on [common.py](src/node_state/clusters/common.py) (`fetch_nodes`, `group_by_hardware`, `print_summary`, `run_sbatch_test`, `run_srun_test`, plus the assoc/QOS helpers below) rather than re-parsing `scontrol` output; cluster modules should hold only what is genuinely site-specific.
 
 Slurm reports the same facts differently per site, so check these before trusting the defaults:
 
 - **Reserved cores.** `common.parse_nodes` records both `cpu_tot` (`CPUTot`) and `cpu_efctv` (`CPUEfctv`, falling back to `CPUTot`). Where `CoreSpecCount` reserves cores, pass `cpu_key="cpu_efctv"` to `node_hw_key`/`group_by_hardware`/`print_summary` or available CPUs will be overstated — `rcl` does this via its `CPU_KEY` constant.
-- **GPU rollups.** `CfgTRES` may list an untyped `gres/gpu=N` alongside per-model entries summing to the same `N`. `parse_tres_gpus` returns both; a cluster that advertises both must drop the rollup or every GPU is counted twice (see `killarney.typed_gpus` and `rcl.typed_gpus`).
+- **GPU rollups.** `CfgTRES` may list an untyped `gres/gpu=N` alongside per-model entries summing to the same `N`. `parse_tres_gpus` returns both; a cluster that advertises both must call `normalize_gpu_rollups` or every GPU is counted twice (as `killarney` and `rcl` do).
 - **Partition routing.** Do not hardcode `--partition` in feasibility probes without checking; `killarney` and `rcl` route jobs by resource request.
 - **Account/QOS caps.** Node tables show the hardware, not what an account may request. `rcl` reports these via `common.fetch_assoc_mgr` + `parse_default_account` / `parse_qos_records` / `qos_for_account` / `qos_user_limits`.
 

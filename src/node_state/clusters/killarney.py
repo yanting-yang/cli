@@ -2,9 +2,6 @@
 
 from . import common
 
-
-PROBE_CPUS = 4
-PROBE_MEM = "32G"
 PROBE_TIMES = (
     "3:00:00",
     "12:00:00",
@@ -17,31 +14,20 @@ INTERACTIVE_GPU_COUNTS = range(1, 5)
 INTERACTIVE_TIME = "3:00:00"
 
 
-def typed_gpus(gpu_counts):
-    """Drop the untyped GPU rollup when per-model counts are available."""
-    typed = {label: count for label, count in gpu_counts.items() if label != "gpu"}
-    return typed if typed else gpu_counts
-
-
-def normalize_node(node):
-    node["cfg_gpus"] = typed_gpus(node["cfg_gpus"])
-    node["alloc_gpus"] = typed_gpus(node["alloc_gpus"])
-    return node
-
-
 def build_directives(
     gpu=None,
     gpu_count=1,
     time_limit=PROBE_TIMES[0],
-    probe_cpus=PROBE_CPUS,
-    probe_ram=PROBE_MEM,
+    *,
+    cpus_per_task,
+    mem,
 ):
     directives = ["--test-only"]
     if gpu:
         directives.append(f"--gres=gpu:{gpu}:{gpu_count}")
     directives += [
-        f"--cpus-per-task={probe_cpus}",
-        f"--mem={probe_ram}",
+        f"--cpus-per-task={cpus_per_task}",
+        f"--mem={mem}",
         f"--time={time_limit}",
     ]
     return directives
@@ -49,15 +35,15 @@ def build_directives(
 
 def clean_result(text):
     for prefix in ("sbatch: error: ", "srun: error: ", "sbatch: ", "srun: "):
-        if text.startswith(prefix):
-            text = text[len(prefix) :]
+        text = text.removeprefix(prefix)
     return text.strip(" .")
 
 
 def run_probes(
     gpu_capacities,
-    probe_cpus=PROBE_CPUS,
-    probe_ram=PROBE_MEM,
+    *,
+    cpus_per_task,
+    mem,
 ):
     requests = [
         (gpu, count, f"{count}x {gpu}")
@@ -74,14 +60,18 @@ def run_probes(
                     gpu,
                     count,
                     time_limit,
-                    probe_cpus=probe_cpus,
-                    probe_ram=probe_ram,
+                    cpus_per_task=cpus_per_task,
+                    mem=mem,
                 )
             )
-            result["label"] = label
-            result["time"] = time_limit
-            result["command"] = "sbatch"
-            results.append(result)
+            results.append(
+                {
+                    **result,
+                    "label": label,
+                    "time": time_limit,
+                    "command": "sbatch",
+                }
+            )
 
     interactive_requests = []
     if INTERACTIVE_GPU in gpu_capacities:
@@ -97,28 +87,30 @@ def run_probes(
                 gpu,
                 count,
                 INTERACTIVE_TIME,
-                probe_cpus=probe_cpus,
-                probe_ram=probe_ram,
+                cpus_per_task=cpus_per_task,
+                mem=mem,
             )
         )
-        result["label"] = label
-        result["time"] = INTERACTIVE_TIME
-        result["command"] = "srun"
-        results.append(result)
+        results.append(
+            {
+                **result,
+                "label": label,
+                "time": INTERACTIVE_TIME,
+                "command": "srun",
+            }
+        )
     return results
 
 
 def print_probe_results(
     results,
-    probe_cpus=PROBE_CPUS,
-    probe_ram=PROBE_MEM,
+    *,
+    cpus_per_task,
+    mem,
     sort_by_start=False,
 ):
     runnable = sum(result["start_time"] is not None for result in results)
-    print(
-        f"Job feasibility (--test-only, {probe_cpus} CPUs, "
-        f"{probe_ram}):"
-    )
+    print(f"Job feasibility (--test-only, {cpus_per_task} CPUs, " f"{mem}):")
     print(f"Runnable: {runnable}/{len(results)}")
 
     displayed_results = results
@@ -159,16 +151,12 @@ def print_probe_results(
         print()
 
 
-def main(
-    probe_cpus=PROBE_CPUS,
-    probe_ram=PROBE_MEM,
-    sort_by_start=False,
-):
+def main(args):
     nodes = common.fetch_nodes()
     if nodes is None:
         return
 
-    nodes = [normalize_node(node) for node in nodes]
+    nodes = [common.normalize_gpu_rollups(node) for node in nodes]
     hardware = common.group_by_hardware(nodes)
 
     for key in sorted(hardware):
@@ -182,17 +170,16 @@ def main(
 
     gpu_types = sorted({gpu for node in nodes for gpu in node["cfg_gpus"]})
     gpu_capacities = {
-        gpu: max(node["cfg_gpus"].get(gpu, 0) for node in nodes)
-        for gpu in gpu_types
+        gpu: max(node["cfg_gpus"].get(gpu, 0) for node in nodes) for gpu in gpu_types
     }
     results = run_probes(
         gpu_capacities,
-        probe_cpus=probe_cpus,
-        probe_ram=probe_ram,
+        cpus_per_task=args.cpus_per_task,
+        mem=args.mem,
     )
     print_probe_results(
         results,
-        probe_cpus=probe_cpus,
-        probe_ram=probe_ram,
-        sort_by_start=sort_by_start,
+        cpus_per_task=args.cpus_per_task,
+        mem=args.mem,
+        sort_by_start=args.sort_by_start,
     )

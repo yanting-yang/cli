@@ -9,7 +9,11 @@ from node_state.clusters import common, vulcan
 class SbatchTestTests(unittest.TestCase):
     def test_result_table_includes_all_gpu_node_results(self):
         results = [
-            {"node": "rack15-12", "start_time": "2026-07-25T19:06:59", "result": "Runnable"},
+            {
+                "node": "rack15-12",
+                "start_time": "2026-07-25T19:06:59",
+                "result": "Runnable",
+            },
             {"node": "rack15-05", "start_time": None, "result": "allocation failure"},
         ]
         output = StringIO()

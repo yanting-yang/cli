@@ -5,7 +5,6 @@ import re
 import subprocess
 from collections import Counter, defaultdict
 
-
 SBATCH_START_PATTERN = re.compile(
     r"\bto start at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\b"
 )
@@ -18,6 +17,18 @@ def parse_tres_gpus(tres_str):
         label = match.group(1) or "gpu"
         gpus[label] = int(match.group(2))
     return gpus
+
+
+def remove_untyped_gpu_rollup(gpu_counts):
+    """Drop the untyped GPU total when per-model counts are available."""
+    typed = {label: count for label, count in gpu_counts.items() if label != "gpu"}
+    return typed if typed else gpu_counts
+
+
+def normalize_gpu_rollups(node):
+    node["cfg_gpus"] = remove_untyped_gpu_rollup(node["cfg_gpus"])
+    node["alloc_gpus"] = remove_untyped_gpu_rollup(node["alloc_gpus"])
+    return node
 
 
 def parse_nodes(output):
@@ -35,7 +46,9 @@ def parse_nodes(output):
             (r"AllocMem=(\d+)", "mem_alloc", int),
         ]:
             match = re.search(pattern, block)
-            node[key] = cast(match.group(1)) if match else ("?" if cast is str else cast())
+            node[key] = (
+                cast(match.group(1)) if match else ("?" if cast is str else cast())
+            )
 
         # Cores held back by CoreSpecCount are counted in CPUTot but cannot be
         # allocated; CPUEfctv is what the scheduler actually offers to jobs.
@@ -105,11 +118,15 @@ def print_table(columns, rows):
         for index in range(len(columns))
     ]
     separator = " | "
-    header = separator.join(column.ljust(width) for column, width in zip(columns, widths))
+    header = separator.join(
+        column.ljust(width) for column, width in zip(columns, widths)
+    )
     print(header)
     print("-" * len(header))
     for row in rows:
-        print(separator.join(str(value).ljust(width) for value, width in zip(row, widths)))
+        print(
+            separator.join(str(value).ljust(width) for value, width in zip(row, widths))
+        )
 
 
 def print_summary(title, nodes, total, gpu_types, cpu_key="cpu_tot"):
@@ -127,7 +144,12 @@ def print_summary(title, nodes, total, gpu_types, cpu_key="cpu_tot"):
 
     rows = [
         ("CPU (cores)", cpu_tot, cpu_alloc, cpu_tot - cpu_alloc),
-        ("Memory (GB)", mem_tot // 1024, mem_alloc // 1024, (mem_tot - mem_alloc) // 1024),
+        (
+            "Memory (GB)",
+            mem_tot // 1024,
+            mem_alloc // 1024,
+            (mem_tot - mem_alloc) // 1024,
+        ),
     ]
     for gpu in gpu_types:
         total_gpus = gpu_cfg_tot[gpu]
@@ -232,7 +254,10 @@ def parse_qos_records(output):
             user = re.sub(r"\(\d+\)$", "", stripped)
             record["user_limits"].setdefault(user, {})
         elif subsection == "users" and indent == 8 and user:
-            for field, key in (("MaxJobsPU", "max_jobs"), ("MaxSubmitJobsPU", "max_submit_jobs")):
+            for field, key in (
+                ("MaxJobsPU", "max_jobs"),
+                ("MaxSubmitJobsPU", "max_submit_jobs"),
+            ):
                 match = re.search(rf"\b{field}=(\S+)", line)
                 if match:
                     record["user_limits"][user][key] = parse_limit(match.group(1))
@@ -306,7 +331,12 @@ def run_sbatch_test(directives, timeout=30):
     script = "#!/bin/bash\n" + "".join(f"#SBATCH {arg}\n" for arg in directives)
     try:
         completed = subprocess.run(
-            ["sbatch"], input=script, capture_output=True, text=True, timeout=timeout
+            ["sbatch"],
+            input=script,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
         )
     except FileNotFoundError:
         return {"start_time": None, "partition": None, "result": "'sbatch' not found"}
@@ -324,7 +354,11 @@ def run_srun_test(directives, timeout=30):
     """Run an `srun --test-only` probe without starting an interactive job."""
     try:
         completed = subprocess.run(
-            ["srun", *directives], capture_output=True, text=True, timeout=timeout
+            ["srun", *directives],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
         )
     except FileNotFoundError:
         return {"start_time": None, "partition": None, "result": "'srun' not found"}

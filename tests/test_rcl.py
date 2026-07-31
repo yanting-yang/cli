@@ -6,35 +6,6 @@ from unittest.mock import patch
 from node_state.clusters import common, rcl
 
 
-class TypedGpusTests(unittest.TestCase):
-    def test_drops_the_rollup_when_per_model_counts_exist(self):
-        gpus = {
-            "gpu": 16,
-            "nvidia_b200": 4,
-            "nvidia_b200_2g.45gb": 8,
-            "nvidia_b200_3g.90gb": 4,
-        }
-
-        self.assertEqual(
-            rcl.typed_gpus(gpus),
-            {"nvidia_b200": 4, "nvidia_b200_2g.45gb": 8, "nvidia_b200_3g.90gb": 4},
-        )
-
-    def test_keeps_the_rollup_when_it_is_the_only_information(self):
-        self.assertEqual(rcl.typed_gpus({"gpu": 4}), {"gpu": 4})
-
-    def test_leaves_cpu_only_nodes_empty(self):
-        self.assertEqual(rcl.typed_gpus({}), {})
-
-    def test_normalizes_both_configured_and_allocated_gpus(self):
-        node = rcl.normalize_node(
-            {"cfg_gpus": {"gpu": 16, "nvidia_b200": 4}, "alloc_gpus": {"gpu": 8, "nvidia_b200": 3}}
-        )
-
-        self.assertEqual(node["cfg_gpus"], {"nvidia_b200": 4})
-        self.assertEqual(node["alloc_gpus"], {"nvidia_b200": 3})
-
-
 class BuildDirectivesTests(unittest.TestCase):
     def test_requests_a_single_gpu_of_the_given_type(self):
         directives = rcl.build_directives("nvidia_b200_3g.90gb")
@@ -78,20 +49,21 @@ class CleanResultTests(unittest.TestCase):
 
 
 class ProbeReportTests(unittest.TestCase):
-    results = [
-        {
-            "label": "1x nvidia_b200",
-            "start_time": None,
-            "partition": None,
-            "result": "sbatch: error: only a MIG slice is allowed",
-        },
-        {
-            "label": "1x nvidia_b200_3g.90gb",
-            "start_time": "2026-07-26T14:30:52",
-            "partition": "mig",
-            "result": "Runnable",
-        },
-    ]
+    def setUp(self):
+        self.results = [
+            {
+                "label": "1x nvidia_b200",
+                "start_time": None,
+                "partition": None,
+                "result": "sbatch: error: only a MIG slice is allowed",
+            },
+            {
+                "label": "1x nvidia_b200_3g.90gb",
+                "start_time": "2026-07-26T14:30:52",
+                "partition": "mig",
+                "result": "Runnable",
+            },
+        ]
 
     def test_reports_each_request_and_its_runnability(self):
         output = StringIO()
@@ -145,24 +117,25 @@ QOS=limited(2)
         MaxJobsPU=1(1) MaxJobsAccruePU=N(0) MaxSubmitJobsPU=N(1)
 """
 
-    def render(self):
+    def render(self, job_counts=None):
         output = StringIO()
-        with redirect_stdout(output):
+        with (
+            patch.object(common, "fetch_user_job_counts", return_value=job_counts),
+            redirect_stdout(output),
+        ):
             rcl.print_account_limits("me")
         return output.getvalue()
 
-    @patch.object(common, "fetch_user_job_counts", return_value={"running": 0, "pending": 2, "total": 2})
     @patch.object(common, "fetch_assoc_mgr")
-    def test_reports_the_governing_account_and_qos(self, assoc_mock, _counts_mock):
+    def test_reports_the_governing_account_and_qos(self, assoc_mock):
         assoc_mock.return_value = self.ASSOC_MGR
 
         self.assertIn("account=guests, QOS=limited", self.render())
 
-    @patch.object(common, "fetch_user_job_counts", return_value={"running": 0, "pending": 2, "total": 2})
     @patch.object(common, "fetch_assoc_mgr")
-    def test_reports_job_limits_against_current_usage(self, assoc_mock, _counts_mock):
+    def test_reports_job_limits_against_current_usage(self, assoc_mock):
         assoc_mock.return_value = self.ASSOC_MGR
-        text = self.render()
+        text = self.render({"running": 0, "pending": 2, "total": 2})
 
         running = next(line for line in text.splitlines() if "Jobs running" in line)
         submitted = next(line for line in text.splitlines() if "Jobs submitted" in line)
@@ -170,9 +143,8 @@ QOS=limited(2)
         self.assertRegex(running, r"Jobs running\s+\|\s+1\s+\|\s+0")
         self.assertRegex(submitted, r"Jobs submitted\s+\|\s+no limit\s+\|\s+2")
 
-    @patch.object(common, "fetch_user_job_counts", return_value={"running": 0, "pending": 0, "total": 0})
     @patch.object(common, "fetch_assoc_mgr")
-    def test_converts_the_memory_cap_to_gigabytes(self, assoc_mock, _counts_mock):
+    def test_converts_the_memory_cap_to_gigabytes(self, assoc_mock):
         assoc_mock.return_value = self.ASSOC_MGR
         text = self.render()
 
@@ -180,16 +152,15 @@ QOS=limited(2)
 
         self.assertRegex(memory, r"Memory per job \(GB\)\s+\|\s+64")
 
-    @patch.object(common, "fetch_user_job_counts", return_value=None)
     @patch.object(common, "fetch_assoc_mgr")
-    def test_marks_usage_unknown_when_squeue_is_unavailable(self, assoc_mock, _counts_mock):
+    def test_marks_usage_unknown_when_squeue_is_unavailable(self, assoc_mock):
         assoc_mock.return_value = self.ASSOC_MGR
 
         self.assertRegex(self.render(), r"Jobs running\s+\|\s+1\s+\|\s+\?")
 
-    @patch.object(common, "fetch_assoc_mgr", return_value=None)
-    def test_notes_when_the_limits_cannot_be_read(self, _assoc_mock):
-        self.assertIn("unavailable", self.render())
+    def test_notes_when_the_limits_cannot_be_read(self):
+        with patch.object(common, "fetch_assoc_mgr", return_value=None):
+            self.assertIn("unavailable", self.render())
 
     @patch.object(common, "fetch_assoc_mgr")
     def test_notes_when_no_single_qos_governs_the_account(self, assoc_mock):
@@ -199,7 +170,9 @@ QOS=limited(2)
 
     @patch.object(common, "fetch_assoc_mgr")
     def test_notes_when_the_user_has_no_association(self, assoc_mock):
-        assoc_mock.return_value = self.ASSOC_MGR.replace("UserName=me(24918)", "UserName=")
+        assoc_mock.return_value = self.ASSOC_MGR.replace(
+            "UserName=me(24918)", "UserName="
+        )
 
         self.assertIn("no Slurm association", self.render())
 
