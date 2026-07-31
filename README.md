@@ -15,46 +15,60 @@ Cluster inspection utilities for Slurm. Currently provides one command, `node_st
 Run `node_state` directly from this repository with [uvx](https://docs.astral.sh/uv/guides/tools/) — no clone or install needed:
 
 ```bash
+# Run the generic fallback
 uvx --from git+https://github.com/yanting-yang/cli node_state
 
-# Options work the same way
-uvx --from git+https://github.com/yanting-yang/cli node_state -x
+# Run a cluster-specific reporter
+uvx --from git+https://github.com/yanting-yang/cli node_state killarney
 ```
 
 ### Run from a local checkout
 
 ```bash
-# Summarize all nodes (no state filtering)
+# Summarize all nodes with the generic fallback
 uv run node_state
 
-# Exclude the preset states: PLANNED DRAIN MAINTENANCE RESERVED ALLOCATED DOWN
-uv run node_state -x
-
-# Exclude specific states (case-insensitive substring match)
-uv run node_state -x DOWN DRAIN
+# Use a cluster-specific reporter
+uv run node_state killarney
 ```
 
 ### Run as a Slurm batch job
 
 ```bash
 sbatch node_state.sbatch
-sbatch node_state.sbatch -x DOWN DRAIN
 ```
 
-The report is written to Slurm's standard `slurm-<job-id>.out` file. Arguments
-after the script name are forwarded to `node_state`.
+The report is written to Slurm's standard `slurm-<job-id>.out` file.
 
 ## Supported clusters
 
-At startup, `node_state` reads the cluster name from `scontrol show config` and runs
-the implementation for that cluster. Every implementation groups nodes by CPU count,
-memory in whole GB, and GPU configuration, then prints a per-type table of total,
-allocated, and available resources. Currently supported:
+With no argument, `node_state` runs the generic fallback. Pass a cluster name to
+run its specialized reporter, for example `node_state killarney`. Every reporter
+groups nodes by CPU count, memory in whole GB, and GPU configuration, then prints
+a per-type table of total, allocated, and available resources. Supported names are:
 
+- `killarney` — multi-node L40S and H100 cluster
 - `vulcan` — multi-node L40S cluster
 - `rcl` — single B200 node partitioned into MIG slices
 
-Any other cluster exits with `Error: unsupported Slurm cluster '<name>'.`
+The fallback reports effective CPUs, memory, and GPU TRES from `scontrol show node`.
+It does not run feasibility probes or apply site-specific GPU and account rules.
+An unsupported explicit cluster name is rejected with a usage error.
+
+### killarney
+
+Killarney advertises both an untyped `gres/gpu` total and a per-model L40S or
+H100 count for each node. The implementation keeps only the per-model count so
+GPUs are not double counted in the resource tables.
+
+After the summaries, it runs `sbatch --test-only` requests for every GPU count
+available on one node (1-8 H100s and 1-4 L40Ss), plus CPU-only requests. Each
+request is checked at 3 hours, 12 hours, 1 day, 3 days, and 7 days. It leaves
+`--partition` unset so Killarney can route each request to the appropriate
+hardware and duration partition. It also tests interactive `srun` feasibility
+for 1-4 L40Ss and one CPU-only request at 3 hours. Both commands use
+`--test-only`, so no job starts. All results share one table whose `Command`,
+`Time`, selected partition, and estimated start columns make the routing visible.
 
 ### vulcan
 
@@ -133,10 +147,5 @@ MIG-slice-only GPU access, or per-job CPU and memory caps) surface.
 
 Test-only requests are not submitted as jobs.
 
-The `(1/1)` in the header is the number of included nodes over the total number of nodes of that hardware type.
-
-## Options
-
-| Option | Description |
-|---|---|
-| `-x, --exclude-states [STATE ...]` | Exclude nodes whose state matches any given value (case-insensitive substring, e.g. `DRAIN` matches `DRAINING`). With no values, applies the preset list `PLANNED DRAIN MAINTENANCE RESERVED ALLOCATED DOWN`. Omit the flag entirely to include all nodes. |
+The `(1/1)` in the header is the number of summarized nodes over the comparison
+total. Hardware summaries include every node reported by Slurm.

@@ -67,15 +67,6 @@ def fetch_nodes():
     return parse_nodes(result.stdout)
 
 
-def filter_active_nodes(nodes, exclude_states=None):
-    if not exclude_states:
-        return list(nodes)
-    exclude_pattern = "|".join(exclude_states)
-    return [
-        node for node in nodes if not re.search(exclude_pattern, node["state"], re.IGNORECASE)
-    ]
-
-
 def node_hw_key(node, cpu_key="cpu_tot"):
     return (
         node[cpu_key],
@@ -121,17 +112,17 @@ def print_table(columns, rows):
         print(separator.join(str(value).ljust(width) for value, width in zip(row, widths)))
 
 
-def print_summary(title, active_nodes, total, gpu_types, cpu_key="cpu_tot"):
-    cpu_tot = sum(node[cpu_key] for node in active_nodes)
-    cpu_alloc = sum(node["cpu_alloc"] for node in active_nodes)
-    mem_tot = sum(node["mem_tot"] for node in active_nodes)
-    mem_alloc = sum(node["mem_alloc"] for node in active_nodes)
+def print_summary(title, nodes, total, gpu_types, cpu_key="cpu_tot"):
+    cpu_tot = sum(node[cpu_key] for node in nodes)
+    cpu_alloc = sum(node["cpu_alloc"] for node in nodes)
+    mem_tot = sum(node["mem_tot"] for node in nodes)
+    mem_alloc = sum(node["mem_alloc"] for node in nodes)
 
     gpu_cfg_tot = {
-        gpu: sum(node["cfg_gpus"].get(gpu, 0) for node in active_nodes) for gpu in gpu_types
+        gpu: sum(node["cfg_gpus"].get(gpu, 0) for node in nodes) for gpu in gpu_types
     }
     gpu_alloc_tot = {
-        gpu: sum(node["alloc_gpus"].get(gpu, 0) for node in active_nodes) for gpu in gpu_types
+        gpu: sum(node["alloc_gpus"].get(gpu, 0) for node in nodes) for gpu in gpu_types
     }
 
     rows = [
@@ -143,8 +134,8 @@ def print_summary(title, active_nodes, total, gpu_types, cpu_key="cpu_tot"):
         allocated_gpus = gpu_alloc_tot[gpu]
         rows.append((gpu, total_gpus, allocated_gpus, total_gpus - allocated_gpus))
 
-    print(f"{title} ({len(active_nodes)}/{total}):")
-    print(f"States: {format_state_counts(active_nodes) or 'none'}")
+    print(f"{title} ({len(nodes)}/{total}):")
+    print(f"States: {format_state_counts(nodes) or 'none'}")
     print_table(["Resource", "Total", "Allocated", "Available"], rows)
     print()
 
@@ -326,6 +317,28 @@ def run_sbatch_test(directives, timeout=30):
             "result": f"Timed out after {timeout}s",
         }
 
+    return parse_scheduling_test_result(completed, "sbatch")
+
+
+def run_srun_test(directives, timeout=30):
+    """Run an `srun --test-only` probe without starting an interactive job."""
+    try:
+        completed = subprocess.run(
+            ["srun", *directives], capture_output=True, text=True, timeout=timeout
+        )
+    except FileNotFoundError:
+        return {"start_time": None, "partition": None, "result": "'srun' not found"}
+    except subprocess.TimeoutExpired:
+        return {
+            "start_time": None,
+            "partition": None,
+            "result": f"Timed out after {timeout}s",
+        }
+
+    return parse_scheduling_test_result(completed, "srun")
+
+
+def parse_scheduling_test_result(completed, command):
     output = "\n".join(
         part.strip() for part in (completed.stdout, completed.stderr) if part.strip()
     )
@@ -342,5 +355,5 @@ def run_sbatch_test(directives, timeout=30):
 
     result = " ".join(output.splitlines())
     if not result:
-        result = f"sbatch exited with status {completed.returncode}"
+        result = f"{command} exited with status {completed.returncode}"
     return {"start_time": None, "partition": partition, "result": result}

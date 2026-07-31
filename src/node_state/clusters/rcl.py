@@ -151,23 +151,20 @@ def print_account_limits(user):
     print()
 
 
-def main(exclude_states=None):
+def main():
     nodes = common.fetch_nodes()
     if nodes is None:
         return
 
     nodes = [normalize_node(node) for node in nodes]
-    active_nodes = common.filter_active_nodes(nodes, exclude_states)
+    hardware = common.group_by_hardware(nodes, CPU_KEY)
 
-    all_hardware = common.group_by_hardware(nodes, CPU_KEY)
-    active_hardware = common.group_by_hardware(active_nodes, CPU_KEY)
-
-    for key in sorted(all_hardware):
+    for key in sorted(hardware):
         _, _, gpu_frozenset = key
         common.print_summary(
             common.hw_key_label(key),
-            active_hardware.get(key, []),
-            len(all_hardware[key]),
+            hardware[key],
+            len(hardware[key]),
             sorted(dict(gpu_frozenset)),
             cpu_key=CPU_KEY,
         )

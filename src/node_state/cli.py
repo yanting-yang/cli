@@ -2,8 +2,6 @@ import argparse
 
 from . import node_resources
 
-PRESET_EXCLUDE_STATES = ["PLANNED", "DRAIN", "MAINTENANCE", "RESERVED", "ALLOCATED", "DOWN"]
-
 
 def main():
     parser = argparse.ArgumentParser(
@@ -11,21 +9,14 @@ def main():
         description="Summarize Slurm node resources (CPU, memory, GPUs) grouped by hardware type.",
     )
     parser.add_argument(
-        "-x",
-        "--exclude-states",
-        nargs="*",
-        default=None,
-        metavar="STATE",
-        help="Exclude nodes whose state matches (case-insensitive substring). "
-        "Without this flag, no nodes are excluded. Pass the flag with no values "
-        f"to use the preset ({' '.join(PRESET_EXCLUDE_STATES)}), or list states explicitly.",
+        "cluster",
+        nargs="?",
+        type=str.casefold,
+        choices=sorted(node_resources.CLUSTER_RUNNERS),
+        help="Run a cluster-specific reporter; omit to use the generic fallback.",
     )
-
     args = parser.parse_args()
-    exclude_states = None
-    if args.exclude_states is not None:
-        exclude_states = args.exclude_states or PRESET_EXCLUDE_STATES
-    node_resources.main(exclude_states=exclude_states)
+    node_resources.main(args.cluster)
 
 
 if __name__ == "__main__":

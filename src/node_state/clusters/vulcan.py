@@ -49,22 +49,19 @@ def print_sbatch_test_results(results):
     print()
 
 
-def main(exclude_states=None):
+def main():
     nodes = common.fetch_nodes()
     if nodes is None:
         return
 
-    active_nodes = common.filter_active_nodes(nodes, exclude_states)
+    hardware = common.group_by_hardware(nodes)
 
-    all_hardware = common.group_by_hardware(nodes)
-    active_hardware = common.group_by_hardware(active_nodes)
-
-    for key in sorted(all_hardware):
+    for key in sorted(hardware):
         _, _, gpu_frozenset = key
         common.print_summary(
             common.hw_key_label(key),
-            active_hardware.get(key, []),
-            len(all_hardware[key]),
+            hardware[key],
+            len(hardware[key]),
             sorted(dict(gpu_frozenset)),
         )
 

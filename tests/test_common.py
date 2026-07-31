@@ -82,25 +82,6 @@ class HardwareGroupingTests(unittest.TestCase):
         self.assertEqual(common.node_hw_key(node)[0], 224)
 
 
-class FilterActiveNodesTests(unittest.TestCase):
-    nodes = [
-        {"name": "a", "state": "MIXED"},
-        {"name": "b", "state": "DOWN+DRAIN"},
-        {"name": "c", "state": "IDLE"},
-    ]
-
-    def test_keeps_every_node_without_exclusions(self):
-        for exclusions in (None, []):
-            with self.subTest(exclude_states=exclusions):
-                kept = common.filter_active_nodes(self.nodes, exclusions)
-                self.assertEqual([node["name"] for node in kept], ["a", "b", "c"])
-
-    def test_matches_states_as_case_insensitive_substrings(self):
-        kept = common.filter_active_nodes(self.nodes, ["drain"])
-
-        self.assertEqual([node["name"] for node in kept], ["a", "c"])
-
-
 class StateCountTests(unittest.TestCase):
     def test_formats_unique_states_with_counts(self):
         nodes = [
@@ -355,6 +336,31 @@ class RunSbatchTestTests(unittest.TestCase):
     @patch.object(common.subprocess, "run", side_effect=FileNotFoundError)
     def test_reports_missing_sbatch(self, _run_mock):
         self.assertEqual(common.run_sbatch_test([])["result"], "'sbatch' not found")
+
+
+class RunSrunTestTests(unittest.TestCase):
+    @patch.object(common.subprocess, "run")
+    def test_runs_directives_and_extracts_the_schedule(self, run_mock):
+        run_mock.return_value = Mock(
+            stdout=(
+                "srun: Job 4490849 to start at 2026-07-30T19:56:05 a using "
+                "4 processors on nodes kn117 in partition gpubase_interac\n"
+            ),
+            stderr="",
+            returncode=0,
+        )
+
+        result = common.run_srun_test(
+            ["--test-only", "--gres=gpu:l40s:1", "--time=3:00:00"]
+        )
+
+        self.assertEqual(result["start_time"], "2026-07-30T19:56:05")
+        self.assertEqual(result["partition"], "gpubase_interac")
+        self.assertEqual(result["result"], "Runnable")
+        self.assertEqual(
+            run_mock.call_args.args[0],
+            ["srun", "--test-only", "--gres=gpu:l40s:1", "--time=3:00:00"],
+        )
 
 
 if __name__ == "__main__":
