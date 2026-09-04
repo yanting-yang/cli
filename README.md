@@ -62,7 +62,13 @@ Killarney advertises both an untyped `gres/gpu` total and a per-model L40S or
 H100 count for each node. The implementation keeps only the per-model count so
 GPUs are not double counted in the resource tables.
 
-After the summaries, it runs `sbatch --test-only` requests for every GPU count
+Between the summaries and the probes it prints the partition table from
+`sinfo --Format=Partition,Gres,Nodes,Time`, listing each partition's GRES, node
+count, and time limit. That is what makes the `Partition` column of the
+feasibility table readable: Killarney routes by duration, and interactive work
+lands in `gpubase_interac` rather than a `_b1`-`_b5` batch partition.
+
+It then runs `sbatch --test-only` requests for every GPU count
 available on one node (1-8 H100s and 1-4 L40Ss), plus CPU-only requests. Each
 request is checked at 3 hours, 12 hours, 1 day, 3 days, and 7 days. It leaves
 `--partition` unset so Killarney can route each request to the appropriate

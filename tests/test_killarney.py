@@ -149,6 +149,7 @@ class MainTests(unittest.TestCase):
             patch.object(common, "fetch_nodes", return_value=[]),
             patch.object(killarney, "run_probes", return_value=[]) as run_mock,
             patch.object(killarney, "print_probe_results") as print_mock,
+            patch.object(killarney, "print_partition_table") as partition_mock,
         ):
             killarney.main(
                 Namespace(
@@ -158,6 +159,7 @@ class MainTests(unittest.TestCase):
                 )
             )
 
+        partition_mock.assert_called_once_with()
         run_mock.assert_called_once_with(
             {},
             cpus_per_task=12,
@@ -169,6 +171,51 @@ class MainTests(unittest.TestCase):
             mem="96G",
             sort_by_start=True,
         )
+
+
+class PartitionTableTests(unittest.TestCase):
+    SINFO_OUTPUT = (
+        "PARTITION           GRES                NODES               TIMELIMIT       \n"
+        "gpubase_interac     gpu:l40s:4          25                  3:00:00         \n"
+    )
+
+    def test_prints_the_sinfo_columns_and_rows(self):
+        output = StringIO()
+
+        with (
+            patch.object(common, "fetch_partitions", return_value=self.SINFO_OUTPUT),
+            redirect_stdout(output),
+        ):
+            killarney.print_partition_table()
+
+        text = output.getvalue()
+        self.assertIn("Partitions:", text)
+        self.assertIn("PARTITION", text)
+        self.assertIn("TIMELIMIT", text)
+        self.assertIn("gpubase_interac", text)
+        self.assertIn("gpu:l40s:4", text)
+
+    def test_reports_when_sinfo_is_unavailable(self):
+        output = StringIO()
+
+        with (
+            patch.object(common, "fetch_partitions", return_value=None),
+            redirect_stdout(output),
+        ):
+            killarney.print_partition_table()
+
+        self.assertIn("'sinfo' unavailable", output.getvalue())
+
+    def test_reports_when_no_partitions_come_back(self):
+        output = StringIO()
+
+        with (
+            patch.object(common, "fetch_partitions", return_value=""),
+            redirect_stdout(output),
+        ):
+            killarney.print_partition_table()
+
+        self.assertIn("none reported", output.getvalue())
 
 
 class ProbeReportTests(unittest.TestCase):

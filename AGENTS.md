@@ -37,7 +37,7 @@ Note the `-t tests` on the test command: `tests/` has no `__init__.py`, so disco
 
 ### Adding a cluster
 
-The no-argument command uses [fallback.py](src/node_state/clusters/fallback.py). Add `src/node_state/clusters/<name>.py` exposing `main(args)` only when a cluster needs site-specific normalization, probes, or account reporting, then register it in `CLUSTER_RUNNERS` in [cli.py](src/node_state/cli.py). Registry keys become the accepted subcommand names, and every runner receives the parsed `argparse.Namespace`. Build on [common.py](src/node_state/clusters/common.py) (`fetch_nodes`, `group_by_hardware`, `print_summary`, `run_sbatch_test`, `run_srun_test`, plus the assoc/QOS helpers below) rather than re-parsing `scontrol` output; cluster modules should hold only what is genuinely site-specific.
+The no-argument command uses [fallback.py](src/node_state/clusters/fallback.py). Add `src/node_state/clusters/<name>.py` exposing `main(args)` only when a cluster needs site-specific normalization, probes, or account reporting, then register it in `CLUSTER_RUNNERS` in [cli.py](src/node_state/cli.py). Registry keys become the accepted subcommand names, and every runner receives the parsed `argparse.Namespace`. Build on [common.py](src/node_state/clusters/common.py) (`fetch_nodes`, `group_by_hardware`, `print_summary`, `run_sbatch_test`, `run_srun_test`, `fetch_partitions`/`parse_sinfo_table`, plus the assoc/QOS helpers below) rather than re-parsing `scontrol` output; cluster modules should hold only what is genuinely site-specific.
 
 Slurm reports the same facts differently per site, so check these before trusting the defaults:
 

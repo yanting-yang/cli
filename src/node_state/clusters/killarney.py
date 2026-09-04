@@ -102,6 +102,25 @@ def run_probes(
     return results
 
 
+def print_partition_table():
+    """Print `sinfo`'s partition, GRES, node-count and time-limit table."""
+    output = common.fetch_partitions()
+    if output is None:
+        print("Partitions: 'sinfo' unavailable")
+        print()
+        return
+
+    columns, rows = common.parse_sinfo_table(output)
+    if not rows:
+        print("Partitions: none reported")
+        print()
+        return
+
+    print("Partitions:")
+    common.print_table(columns, rows)
+    print()
+
+
 def print_probe_results(
     results,
     *,
@@ -167,6 +186,8 @@ def main(args):
             len(hardware[key]),
             sorted(dict(gpu_frozenset)),
         )
+
+    print_partition_table()
 
     gpu_types = sorted({gpu for node in nodes for gpu in node["cfg_gpus"]})
     gpu_capacities = {

@@ -304,6 +304,66 @@ class UserJobCountTests(unittest.TestCase):
             self.assertIsNone(common.fetch_user_job_counts("me"))
 
 
+SINFO_PARTITIONS = (
+    "PARTITION           GRES                NODES               TIMELIMIT           \n"
+    "gpubase_h100_b1     gpu:h100:8          10                  3:00:00             \n"
+    "gpubase_interac     gpu:l40s:4          25                  3:00:00             \n"
+    "cpubase_bycore_b1                       4                   3:00:00             \n"
+)
+
+
+class ParseSinfoTableTests(unittest.TestCase):
+    def test_parses_the_header_and_rows(self):
+        columns, rows = common.parse_sinfo_table(SINFO_PARTITIONS)
+
+        self.assertEqual(columns, ["PARTITION", "GRES", "NODES", "TIMELIMIT"])
+        self.assertEqual(
+            rows[:2],
+            [
+                ["gpubase_h100_b1", "gpu:h100:8", "10", "3:00:00"],
+                ["gpubase_interac", "gpu:l40s:4", "25", "3:00:00"],
+            ],
+        )
+
+    def test_keeps_an_empty_field_in_its_own_column(self):
+        _, rows = common.parse_sinfo_table(SINFO_PARTITIONS)
+
+        self.assertEqual(rows[-1], ["cpubase_bycore_b1", "", "4", "3:00:00"])
+
+    def test_returns_nothing_for_empty_output(self):
+        self.assertEqual(common.parse_sinfo_table(""), ([], []))
+
+    def test_returns_no_rows_for_a_header_only_table(self):
+        columns, rows = common.parse_sinfo_table("PARTITION           GRES\n")
+
+        self.assertEqual(columns, ["PARTITION", "GRES"])
+        self.assertEqual(rows, [])
+
+
+class FetchPartitionsTests(unittest.TestCase):
+    @patch.object(common.subprocess, "run")
+    def test_requests_the_partition_format(self, run_mock):
+        run_mock.return_value = Mock(stdout=SINFO_PARTITIONS, stderr="", returncode=0)
+
+        self.assertEqual(common.fetch_partitions(), SINFO_PARTITIONS)
+        self.assertEqual(
+            run_mock.call_args.args[0],
+            ["sinfo", "--Format=Partition,Gres,Nodes,Time"],
+        )
+
+    def test_reports_none_when_sinfo_is_missing(self):
+        with patch.object(common.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertIsNone(common.fetch_partitions())
+
+    def test_reports_none_when_the_command_fails(self):
+        with patch.object(
+            common.subprocess,
+            "run",
+            side_effect=subprocess.CalledProcessError(1, "sinfo"),
+        ):
+            self.assertIsNone(common.fetch_partitions())
+
+
 class FetchAssocMgrTests(unittest.TestCase):
     def test_reports_none_when_scontrol_is_missing(self):
         with patch.object(common.subprocess, "run", side_effect=FileNotFoundError):

@@ -9,6 +9,7 @@ SBATCH_START_PATTERN = re.compile(
     r"\bto start at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\b"
 )
 SBATCH_PARTITION_PATTERN = re.compile(r"\bin partition (\S+)")
+SINFO_PARTITION_FORMAT = "Partition,Gres,Nodes,Time"
 
 
 def parse_tres_gpus(tres_str):
@@ -78,6 +79,41 @@ def fetch_nodes():
         return None
 
     return parse_nodes(result.stdout)
+
+
+def fetch_partitions(sinfo_format=SINFO_PARTITION_FORMAT):
+    """Return `sinfo --Format=...` output, or None when it cannot run."""
+    try:
+        result = subprocess.run(
+            ["sinfo", f"--Format={sinfo_format}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+
+    return result.stdout
+
+
+def parse_sinfo_table(text):
+    """Split fixed-width `sinfo --Format=...` output into columns and rows.
+
+    Field boundaries come from the header line rather than from whitespace, so
+    an empty value keeps its column instead of shifting the rest of the row.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return [], []
+
+    header = lines[0]
+    starts = [match.start() for match in re.finditer(r"\S+", header)]
+    bounds = list(zip(starts, [*starts[1:], None]))
+    columns = [header[start:end].strip() for start, end in bounds]
+    rows = [
+        [line[start:end].strip() for start, end in bounds] for line in lines[1:]
+    ]
+    return columns, rows
 
 
 def node_hw_key(node, cpu_key="cpu_tot"):
