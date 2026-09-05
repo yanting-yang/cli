@@ -104,7 +104,6 @@ def print_account_limits(user):
 
     record = qos_records[qos_name]
     limits = common.qos_user_limits(record, user)
-    per_job = record["max_tres_pj"]
     counts = common.fetch_user_job_counts(user) or {}
 
     rows = [
@@ -119,13 +118,32 @@ def print_account_limits(user):
             counts.get("total", "?"),
         ),
     ]
-    for label, tres, scale in [
-        ("CPUs per job", "cpu", 1),
-        ("Memory per job (GB)", "mem", 1024),
-        ("GPUs per job", "gres/gpu", 1),
+    for scope, resource_limits, usage in [
+        ("job", record["max_tres_pj"], None),
+        (
+            "user",
+            limits.get("max_tres_pu", {}),
+            record["user_tres_usage"].get(user, {}),
+        ),
     ]:
-        if tres in per_job:
-            rows.append((label, per_job[tres] // scale, "-"))
+        resources = [
+            (f"CPUs per {scope}", "cpu", 1),
+            (f"Memory per {scope} (GB)", "mem", 1024),
+            (f"GPUs per {scope}", "gres/gpu", 1),
+        ]
+        resources += [
+            (f"{tres.removeprefix('gres/gpu:')} per {scope}", tres, 1)
+            for tres in sorted(resource_limits)
+            if tres.startswith("gres/gpu:")
+        ]
+        for label, tres, scale in resources:
+            value = resource_limits.get(tres)
+            if value is None:
+                continue
+            in_use = "-" if usage is None else usage.get(tres, "?")
+            if isinstance(in_use, int):
+                in_use = f"{in_use / scale:g}"
+            rows.append((label, f"{value / scale:g}", in_use))
 
     print(f"Account limits (account={account}, QOS={qos_name}):")
     common.print_table(["Limit", "Value", "In use"], rows)

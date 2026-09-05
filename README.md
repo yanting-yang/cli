@@ -134,13 +134,31 @@ Blocked requests:
 whole node — including capacity your account is not allowed to request. `Jobs running`
 is the QOS `MaxJobsPU` and `Jobs submitted` is `MaxSubmitJobsPU`, so in the example
 above only one job runs at a time while any number may sit queued (extras pend with
-reason `QOSMaxJobsPerUserLimit`). The remaining rows are the per-job `MaxTRESPJ` caps.
+reason `QOSMaxJobsPerUserLimit`). The per-job rows show `MaxTRESPJ` caps. Per-user
+`MaxTRESPU` rows show the total resources a user may hold across running jobs, with
+the user's current allocation in the `In use` column.
+
+For example, an `rcl` account using the `normal` QOS can have no per-job resource
+caps while still having these per-user caps:
+
+| Resource | Per-user limit |
+| --- | ---: |
+| CPUs | 64 |
+| Memory (GB) | 512 |
+| GPUs, all types combined | 4 |
+| `nvidia_b200` | 1 |
+| `nvidia_b200_2g.45gb` | 3 |
+| `nvidia_b200_3g.90gb` | 1 |
+
+The combined GPU limit and each GPU-type limit apply together. These values are
+read from Slurm on each run, so the report follows changes to the account or QOS.
 
 The governing QOS is resolved from data rather than hardcoded: `node_state` looks up
 your default association's account, then finds the QOS listing that account under
 `Account Limits`. Because a QOS applies the same per-user limits to everyone, the
-numbers are still reported correctly when you have no jobs tracked yet. If the limits
-cannot be read (no accounting, or `scontrol show assoc_mgr` is restricted), the section
+numbers are still reported correctly when you have no jobs tracked yet. The report
+never uses another user's allocation as yours; missing usage is marked `?`. If the
+limits cannot be read (no accounting, or `scontrol show assoc_mgr` is restricted), the section
 is replaced by a one-line note and the rest of the report is unaffected.
 
 Note that `sacctmgr` and `sacct` may fail from a login shell with "Connection refused"

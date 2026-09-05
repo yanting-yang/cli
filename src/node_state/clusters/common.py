@@ -219,6 +219,21 @@ def parse_tres_values(tres_str):
     return values
 
 
+def parse_tres_limits(tres_str):
+    """Parse `cpu=64(8),mem=N(65536)` into separate limit and usage dicts."""
+    limits = {}
+    usage = {}
+    for item in tres_str.split(","):
+        name, separator, raw = item.strip().rpartition("=")
+        if not name or not separator:
+            continue
+        match = re.fullmatch(r"(N|\d+)\((\d+)\)", raw)
+        if match:
+            limits[name] = None if match.group(1) == "N" else int(match.group(1))
+            usage[name] = int(match.group(2))
+    return limits, usage
+
+
 def parse_limit(text):
     """Turn a `16(5)` / `N(0)` limit token into its numeric limit or None."""
     match = re.match(r"(\S+?)\((\d+)\)", text)
@@ -245,9 +260,11 @@ def parse_default_account(output, user):
 def parse_qos_records(output):
     """Parse the `QOS Records` section of `scontrol show assoc_mgr` output.
 
-    Returns {qos_name: {"max_tres_pj": {...}, "accounts": {...},
-    "user_limits": {user: {"max_jobs": int|None, "max_submit_jobs": int|None}}}}.
-    A limit of None means the QOS sets no limit for that field.
+    Each QOS record contains per-job `max_tres_pj`, `accounts`, and
+    `user_limits` keyed by user with `max_jobs`, `max_submit_jobs`, and
+    per-user `max_tres_pu` caps. A limit of None means no QOS cap is set.
+    Resource usage is kept separately in `user_tres_usage`, keyed by user,
+    so borrowing another user's limits never borrows their usage.
     """
     records = {}
     record = None
@@ -265,7 +282,12 @@ def parse_qos_records(output):
 
         match = re.match(r"^QOS=(\S+?)\(\d+\)\s*$", line)
         if match:
-            record = {"max_tres_pj": {}, "accounts": set(), "user_limits": {}}
+            record = {
+                "max_tres_pj": {},
+                "accounts": set(),
+                "user_limits": {},
+                "user_tres_usage": {},
+            }
             records[match.group(1)] = record
             subsection = None
             user = None
@@ -297,6 +319,11 @@ def parse_qos_records(output):
                 match = re.search(rf"\b{field}=(\S+)", line)
                 if match:
                     record["user_limits"][user][key] = parse_limit(match.group(1))
+            match = re.search(r"\bMaxTRESPU=(\S*)", line)
+            if match:
+                limits, usage = parse_tres_limits(match.group(1))
+                record["user_limits"][user]["max_tres_pu"] = limits
+                record["user_tres_usage"][user] = usage
     return records
 
 
@@ -309,7 +336,7 @@ def qos_for_account(qos_records, account):
 
 
 def qos_user_limits(record, user):
-    """Per-user job limits for `record`.
+    """Per-user job and resource limits for `record`.
 
     QOS per-user limits are a single value applied to every user, so when the
     caller has no entry yet (they have never had a job tracked under this QOS)

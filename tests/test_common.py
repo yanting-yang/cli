@@ -183,6 +183,55 @@ class ParseTresValuesTests(unittest.TestCase):
         self.assertEqual(common.parse_tres_values("cpu=unlimited,mem=64"), {"mem": 64})
 
 
+class ParseTresLimitsTests(unittest.TestCase):
+    def test_separates_resource_limits_from_current_usage(self):
+        limits, usage = common.parse_tres_limits(
+            "cpu=64(56),mem=524288(290816),gres/gpu=4(4)"
+        )
+
+        self.assertEqual(limits, {"cpu": 64, "mem": 524288, "gres/gpu": 4})
+        self.assertEqual(usage, {"cpu": 56, "mem": 290816, "gres/gpu": 4})
+
+    def test_keeps_unlimited_resources_and_zero_caps_distinct(self):
+        limits, usage = common.parse_tres_limits("cpu=N(8),gres/gpu=0(0)")
+
+        self.assertEqual(limits, {"cpu": None, "gres/gpu": 0})
+        self.assertEqual(usage, {"cpu": 8, "gres/gpu": 0})
+
+    def test_preserves_model_gpu_names_alongside_the_total_gpu_limit(self):
+        limits, usage = common.parse_tres_limits(
+            "gres/gpu=4(2),gres/gpu:nvidia_b200=1(0),"
+            "gres/gpu:nvidia_b200_2g.45gb=3(2)"
+        )
+
+        self.assertEqual(
+            limits,
+            {
+                "gres/gpu": 4,
+                "gres/gpu:nvidia_b200": 1,
+                "gres/gpu:nvidia_b200_2g.45gb": 3,
+            },
+        )
+        self.assertEqual(
+            usage,
+            {
+                "gres/gpu": 2,
+                "gres/gpu:nvidia_b200": 0,
+                "gres/gpu:nvidia_b200_2g.45gb": 2,
+            },
+        )
+
+    def test_ignores_empty_and_malformed_entries_without_losing_valid_ones(self):
+        self.assertEqual(common.parse_tres_limits(""), ({}, {}))
+        limits, usage = common.parse_tres_limits(
+            "garbage,cpu=bad(3),mem=64,gres/gpu=4(bad),"
+            "node=3(1)trailing,,cpu=64(0)"
+        )
+
+        self.assertEqual(limits, {"cpu": 64})
+        self.assertEqual(usage, {"cpu": 0})
+
+
 class ParseLimitTests(unittest.TestCase):
     def test_reads_a_numeric_limit(self):
         self.assertEqual(common.parse_limit("16(5)"), 16)
@@ -230,14 +279,51 @@ class ParseQosRecordsTests(unittest.TestCase):
         self.assertEqual(self.records["limited"]["accounts"], {"guests"})
         self.assertEqual(self.records["normal"]["accounts"], {"rcl"})
 
-    def test_reads_per_user_job_limits(self):
+    def test_reads_per_user_job_and_resource_limits(self):
         self.assertEqual(
             self.records["limited"]["user_limits"]["yuxiang.fu"],
-            {"max_jobs": 1, "max_submit_jobs": None},
+            {
+                "max_jobs": 1,
+                "max_submit_jobs": None,
+                "max_tres_pu": {"cpu": None, "mem": None, "gres/gpu": 1},
+            },
         )
         self.assertEqual(
             self.records["normal"]["user_limits"]["mahdik"],
-            {"max_jobs": 16, "max_submit_jobs": 100},
+            {
+                "max_jobs": 16,
+                "max_submit_jobs": 100,
+                "max_tres_pu": {"cpu": 64, "mem": 524288, "gres/gpu": 4},
+            },
+        )
+
+    def test_records_resource_usage_separately_from_borrowable_limits(self):
+        self.assertEqual(
+            self.records["normal"]["user_tres_usage"],
+            {"mahdik": {"cpu": 56, "mem": 290816, "gres/gpu": 4}},
+        )
+        self.assertEqual(
+            self.records["limited"]["user_tres_usage"],
+            {"yuxiang.fu": {"cpu": 8, "mem": 65536, "gres/gpu": 1}},
+        )
+
+    def test_keeps_each_users_resource_usage_separate(self):
+        output = ASSOC_MGR.replace(
+            "QOS=limited(2)",
+            "      me(12345)\n"
+            "        MaxJobsPU=16(1) MaxSubmitJobsPU=100(1)\n"
+            "        MaxTRESPU=cpu=64(8),mem=524288(65536),gres/gpu=4(0)\n"
+            "QOS=limited(2)",
+        )
+        record = common.parse_qos_records(output)["normal"]
+
+        self.assertEqual(record["user_limits"]["me"], record["user_limits"]["mahdik"])
+        self.assertEqual(
+            record["user_tres_usage"],
+            {
+                "mahdik": {"cpu": 56, "mem": 290816, "gres/gpu": 4},
+                "me": {"cpu": 8, "mem": 65536, "gres/gpu": 0},
+            },
         )
 
     def test_ignores_association_records(self):
@@ -273,7 +359,25 @@ class QosLookupTests(unittest.TestCase):
         # user's entry carries the same numbers.
         self.assertEqual(
             common.qos_user_limits(self.records["limited"], "yanting.yang"),
-            {"max_jobs": 1, "max_submit_jobs": None},
+            {
+                "max_jobs": 1,
+                "max_submit_jobs": None,
+                "max_tres_pu": {"cpu": None, "mem": None, "gres/gpu": 1},
+            },
+        )
+
+    def test_borrowing_resource_limits_does_not_create_usage_for_the_user(self):
+        record = self.records["normal"]
+
+        limits = common.qos_user_limits(record, "yanting.yang")
+
+        self.assertEqual(
+            limits["max_tres_pu"], {"cpu": 64, "mem": 524288, "gres/gpu": 4}
+        )
+        self.assertNotIn("yanting.yang", record["user_tres_usage"])
+        self.assertEqual(
+            record["user_tres_usage"]["mahdik"],
+            {"cpu": 56, "mem": 290816, "gres/gpu": 4},
         )
 
     def test_returns_empty_limits_when_no_user_entries_exist(self):

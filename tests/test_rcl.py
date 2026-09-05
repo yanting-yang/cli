@@ -117,6 +117,29 @@ QOS=limited(2)
         MaxJobsPU=1(1) MaxJobsAccruePU=N(0) MaxSubmitJobsPU=N(1)
 """
 
+    NORMAL_ASSOC_MGR = """Current Association Manager state
+
+Association Records
+
+ClusterName=rcl Account=rcl UserName=me(24918) Partition= Priority=0 ID=32
+    ParentAccount= Lineage=/rcl/0-me/ DefAssoc=Yes
+
+QOS Records
+
+QOS=normal(1)
+    MaxTRESPJ=
+    Account Limits
+      rcl
+        MaxJobsPA=N(5) MaxSubmitJobsPA=N(5)
+    User Limits
+      someone(24958)
+        MaxJobsPU=16(5) MaxSubmitJobsPU=100(5)
+        MaxTRESPU=cpu=64(56),mem=524288(290816),gres/gpu=4(4),gres/gpu:nvidia_b200=1(1),gres/gpu:nvidia_b200_2g.45gb=3(2),gres/gpu:nvidia_b200_3g.90gb=1(1)
+      me(24918)
+        MaxJobsPU=16(1) MaxSubmitJobsPU=100(1)
+        MaxTRESPU=cpu=64(8),mem=524288(65536),gres/gpu=4(1),gres/gpu:nvidia_b200=1(0),gres/gpu:nvidia_b200_2g.45gb=3(0),gres/gpu:nvidia_b200_3g.90gb=1(1)
+"""
+
     def render(self, job_counts=None):
         output = StringIO()
         with (
@@ -151,6 +174,57 @@ QOS=limited(2)
         memory = next(line for line in text.splitlines() if "Memory per job" in line)
 
         self.assertRegex(memory, r"Memory per job \(GB\)\s+\|\s+64")
+
+    @patch.object(common, "fetch_assoc_mgr")
+    def test_reports_per_user_resource_limits_and_the_callers_usage(self, assoc_mock):
+        assoc_mock.return_value = self.NORMAL_ASSOC_MGR
+        text = self.render()
+
+        self.assertIn("account=rcl, QOS=normal", text)
+        for label, limit, usage in [
+            (r"CPUs per user", 64, 8),
+            (r"Memory per user \(GB\)", 512, 64),
+            (r"GPUs per user", 4, 1),
+            (r"nvidia_b200 per user", 1, 0),
+            (r"nvidia_b200_2g\.45gb per user", 3, 0),
+            (r"nvidia_b200_3g\.90gb per user", 1, 1),
+        ]:
+            with self.subTest(label=label):
+                self.assertRegex(text, rf"{label}\s+\|\s+{limit}\s+\|\s+{usage}")
+        self.assertNotIn("per job", text)
+
+    @patch.object(common, "fetch_assoc_mgr")
+    def test_borrows_resource_caps_without_borrowing_another_users_usage(self, assoc_mock):
+        assoc_mock.return_value = self.NORMAL_ASSOC_MGR.replace(
+            "      me(24918)", "      another(24919)"
+        )
+        text = self.render()
+
+        self.assertRegex(text, r"CPUs per user\s+\|\s+64\s+\|\s+\?")
+        self.assertRegex(text, r"Memory per user \(GB\)\s+\|\s+512\s+\|\s+\?")
+        self.assertRegex(text, r"GPUs per user\s+\|\s+4\s+\|\s+\?")
+
+    @patch.object(common, "fetch_assoc_mgr")
+    def test_keeps_per_job_and_per_user_caps_distinct(self, assoc_mock):
+        assoc_mock.return_value = self.ASSOC_MGR + (
+            "        MaxTRESPU=cpu=N(8),mem=N(65536),gres/gpu=1(1)\n"
+        )
+        text = self.render()
+
+        self.assertRegex(text, r"CPUs per job\s+\|\s+8\s+\|\s+-")
+        self.assertRegex(text, r"Memory per job \(GB\)\s+\|\s+64\s+\|\s+-")
+        self.assertRegex(text, r"GPUs per job\s+\|\s+1\s+\|\s+-")
+        self.assertRegex(text, r"GPUs per user\s+\|\s+1\s+\|\s+\?")
+        self.assertNotIn("CPUs per user", text)
+        self.assertNotIn("Memory per user", text)
+
+    @patch.object(common, "fetch_assoc_mgr")
+    def test_preserves_zero_resource_caps(self, assoc_mock):
+        assoc_mock.return_value = self.NORMAL_ASSOC_MGR.replace(
+            "gres/gpu:nvidia_b200=1(", "gres/gpu:nvidia_b200=0("
+        )
+
+        self.assertRegex(self.render(), r"nvidia_b200 per user\s+\|\s+0\s+\|\s+0")
 
     @patch.object(common, "fetch_assoc_mgr")
     def test_marks_usage_unknown_when_squeue_is_unavailable(self, assoc_mock):
