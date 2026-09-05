@@ -1,7 +1,7 @@
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from node_state.clusters import common, rcl
 
@@ -140,6 +140,28 @@ QOS=normal(1)
         MaxTRESPU=cpu=64(8),mem=524288(65536),gres/gpu=4(1),gres/gpu:nvidia_b200=1(0),gres/gpu:nvidia_b200_2g.45gb=3(0),gres/gpu:nvidia_b200_3g.90gb=1(1)
 """
 
+    MULTI_QOS_ASSOC_MGR = NORMAL_ASSOC_MGR + """
+QOS=opportunistic(16)
+    MaxTRESPJ=cpu=32,mem=131072,gres/gpu=2
+    Account Limits
+      rcl
+        MaxJobsPA=N(2) MaxSubmitJobsPA=N(3)
+    User Limits
+      someone(24958)
+        MaxJobsPU=N(1) MaxSubmitJobsPU=N(1)
+        MaxTRESPU=cpu=N(32),mem=N(131072),gres/gpu=N(1)
+      me(24918)
+        MaxJobsPU=N(2) MaxSubmitJobsPU=N(3)
+        MaxTRESPU=cpu=N(16),mem=N(65536),gres/gpu=N(1)
+QOS=limited(2)
+    MaxTRESPJ=cpu=8
+    Account Limits
+      guests
+        MaxJobsPA=N(1) MaxSubmitJobsPA=N(1)
+    User Limits
+        No Users
+"""
+
     def render(self, job_counts=None):
         output = StringIO()
         with (
@@ -150,7 +172,7 @@ QOS=normal(1)
         return output.getvalue()
 
     @patch.object(common, "fetch_assoc_mgr")
-    def test_reports_the_governing_account_and_qos(self, assoc_mock):
+    def test_reports_the_matching_account_and_qos(self, assoc_mock):
         assoc_mock.return_value = self.ASSOC_MGR
 
         self.assertIn("account=guests, QOS=limited", self.render())
@@ -237,10 +259,57 @@ QOS=normal(1)
             self.assertIn("unavailable", self.render())
 
     @patch.object(common, "fetch_assoc_mgr")
-    def test_notes_when_no_single_qos_governs_the_account(self, assoc_mock):
+    def test_notes_when_no_qos_lists_the_account(self, assoc_mock):
         assoc_mock.return_value = self.ASSOC_MGR.replace("      guests", "      other")
 
-        self.assertIn("no single QOS", self.render())
+        self.assertIn("no QOS found", self.render())
+
+    @patch.object(common, "fetch_user_job_counts")
+    @patch.object(common, "fetch_assoc_mgr")
+    def test_reports_each_matching_qos_with_its_own_limits_and_usage(
+        self, assoc_mock, counts_mock
+    ):
+        assoc_mock.return_value = self.MULTI_QOS_ASSOC_MGR
+        counts = {
+            "normal": {"running": 1, "pending": 0, "total": 1},
+            "opportunistic": {"running": 2, "pending": 1, "total": 3},
+        }
+        counts_mock.side_effect = lambda user, qos: counts[qos]
+        output = StringIO()
+
+        with redirect_stdout(output):
+            rcl.print_account_limits("me")
+
+        tables = output.getvalue().split("Account limits ")
+        self.assertEqual(len(tables), 3)
+        normal, opportunistic = tables[1:]
+        self.assertIn("account=rcl, QOS=normal", normal)
+        self.assertIn("account=rcl, QOS=opportunistic", opportunistic)
+        self.assertRegex(normal, r"Jobs running\s+\|\s+16\s+\|\s+1")
+        self.assertRegex(normal, r"Jobs submitted\s+\|\s+100\s+\|\s+1")
+        self.assertRegex(normal, r"CPUs per user\s+\|\s+64\s+\|\s+8")
+        self.assertNotIn("CPUs per job", normal)
+        self.assertRegex(opportunistic, r"Jobs running\s+\|\s+no limit\s+\|\s+2")
+        self.assertRegex(opportunistic, r"Jobs submitted\s+\|\s+no limit\s+\|\s+3")
+        self.assertRegex(opportunistic, r"CPUs per job\s+\|\s+32\s+\|\s+-")
+        self.assertNotIn("CPUs per user", opportunistic)
+        self.assertNotIn("QOS=limited", output.getvalue())
+        self.assertEqual(
+            counts_mock.call_args_list,
+            [call("me", qos="normal"), call("me", qos="opportunistic")],
+        )
+
+    @patch.object(common, "fetch_assoc_mgr")
+    def test_reports_unknown_job_caps_when_a_qos_has_no_user_entries(self, assoc_mock):
+        assoc_mock.return_value = self.ASSOC_MGR.partition("    User Limits")[0] + (
+            "    User Limits\n        No Users\n"
+        )
+
+        text = self.render({"running": 0, "pending": 0, "total": 0})
+
+        self.assertRegex(text, r"Jobs running\s+\|\s+\?\s+\|\s+0")
+        self.assertRegex(text, r"Jobs submitted\s+\|\s+\?\s+\|\s+0")
+        self.assertRegex(text, r"CPUs per job\s+\|\s+8\s+\|\s+-")
 
     @patch.object(common, "fetch_assoc_mgr")
     def test_notes_when_the_user_has_no_association(self, assoc_mock):

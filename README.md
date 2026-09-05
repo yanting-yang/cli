@@ -50,7 +50,7 @@ resources. Supported subcommands are:
 
 - `killarney` — multi-node L40S and H100 cluster
 - `vulcan` — multi-node L40S cluster
-- `rcl` — single B200 node partitioned into MIG slices
+- `rcl` — B200 and B300 servers with full GPUs and MIG slices
 
 The fallback reports effective CPUs, memory, and GPU TRES from `scontrol show node`.
 It does not run feasibility probes or apply site-specific GPU and account rules.
@@ -129,10 +129,11 @@ Blocked requests:
   1x nvidia_b200: Limited account 'you': GPUs — only a MIG slice is allowed ...
 ```
 
-**Account limits** are the caps that actually govern what you can submit, read from
-`scontrol show assoc_mgr`. They matter because the resource tables above show the
-whole node — including capacity your account is not allowed to request. `Jobs running`
-is the QOS `MaxJobsPU` and `Jobs submitted` is `MaxSubmitJobsPU`, so in the example
+The **Account limits** section reports QOS caps from `scontrol show assoc_mgr`, with
+a separate table for each QOS matching your default account. They matter because
+the resource tables above show the whole node — including capacity your account is
+not allowed to request. `Jobs running` is the QOS `MaxJobsPU` and `Jobs submitted`
+is `MaxSubmitJobsPU`, so in the example
 above only one job runs at a time while any number may sit queued (extras pend with
 reason `QOSMaxJobsPerUserLimit`). The per-job rows show `MaxTRESPJ` caps. Per-user
 `MaxTRESPU` rows show the total resources a user may hold across running jobs, with
@@ -153,13 +154,16 @@ caps while still having these per-user caps:
 The combined GPU limit and each GPU-type limit apply together. These values are
 read from Slurm on each run, so the report follows changes to the account or QOS.
 
-The governing QOS is resolved from data rather than hardcoded: `node_state` looks up
-your default association's account, then finds the QOS listing that account under
-`Account Limits`. Because a QOS applies the same per-user limits to everyone, the
-numbers are still reported correctly when you have no jobs tracked yet. The report
-never uses another user's allocation as yours; missing usage is marked `?`. If the
-limits cannot be read (no accounting, or `scontrol show assoc_mgr` is restricted), the section
-is replaced by a one-line note and the rest of the report is unaffected.
+`node_state` looks up your default association's account, then prints every QOS
+listing that account under `Account Limits`. These matches come from the controller's
+cache; they do not identify your default QOS or establish which QOSs you may use.
+Because a QOS applies the same per-user limits to everyone, limits can be read from
+another user's entry when you have no jobs tracked yet. The report never uses
+another user's allocation as yours. Running and submitted job counts come from
+`squeue`, filtered to your user and the table's QOS across all accounts. Missing job
+limits or usage are marked `?`. If the limits cannot be read (no accounting, or
+`scontrol show assoc_mgr` is restricted), the section is replaced by a one-line note
+and the rest of the report is unaffected.
 
 Note that `sacctmgr` and `sacct` may fail from a login shell with "Connection refused"
 because `slurmdbd` listens on the controller; this does not mean accounting is off, and
@@ -167,8 +171,9 @@ because `slurmdbd` listens on the controller; this does not mean accounting is o
 
 Two more `rcl` details are worth knowing when reading these numbers:
 
-- **CPU totals are the effective count.** The node reserves cores via `CoreSpecCount`,
-  so its 224 CPUs are reported as the 192 the scheduler will actually hand out.
+- **CPU totals are the effective count.** The example node reserves cores via
+  `CoreSpecCount`, so its 224 CPUs are reported as the 192 the scheduler will
+  actually hand out.
 - **GPUs are counted per model.** `CfgTRES` advertises a `gres/gpu` rollup *and* the
   per-model counts that sum to it; only the per-model counts are shown, so the GPUs
   are not double counted.

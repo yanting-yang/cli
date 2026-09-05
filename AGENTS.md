@@ -44,7 +44,7 @@ Slurm reports the same facts differently per site, so check these before trustin
 - **Reserved cores.** `common.parse_nodes` records both `cpu_tot` (`CPUTot`) and `cpu_efctv` (`CPUEfctv`, falling back to `CPUTot`). Where `CoreSpecCount` reserves cores, pass `cpu_key="cpu_efctv"` to `node_hw_key`/`group_by_hardware`/`print_summary` or available CPUs will be overstated — `rcl` does this via its `CPU_KEY` constant.
 - **GPU rollups.** `CfgTRES` may list an untyped `gres/gpu=N` alongside per-model entries summing to the same `N`. `parse_tres_gpus` returns both; a cluster that advertises both must call `normalize_gpu_rollups` or every GPU is counted twice (as `killarney` and `rcl` do).
 - **Partition routing.** Do not hardcode `--partition` in feasibility probes without checking; `killarney` and `rcl` route jobs by resource request.
-- **Account/QOS caps.** Node tables show the hardware, not what an account may request. `rcl` reports these via `common.fetch_assoc_mgr` + `parse_default_account` / `parse_qos_records` / `qos_for_account` / `qos_user_limits`.
+- **Account/QOS caps.** Node tables show the hardware, not what an account may request. `rcl` reports these via `common.fetch_assoc_mgr` + `parse_default_account` / `parse_qos_records` / `qos_names_for_account` / `qos_user_limits`.
 
 ### Reading account limits
 
@@ -52,8 +52,8 @@ Slurm reports the same facts differently per site, so check these before trustin
 
 Two quirks of that output shape the parser in [common.py](src/node_state/clusters/common.py):
 
-- Association records carry **no** `QOS=` field, and `users=` does **not** filter the QOS section. The account a user belongs to is therefore matched against each QOS's `Account Limits` block to find the governing QOS (`qos_for_account`).
-- `MaxJobsPU` / `MaxSubmitJobsPU` are only rendered inside per-user entries under `User Limits`, and a user with no tracked jobs has no entry at all. Since a QOS applies one value to every user, `qos_user_limits` falls back to another user's entry for the limits — take only the limit, never the parenthesised usage, which is that other user's. Live usage for the caller comes from `squeue` via `fetch_user_job_counts`.
+- Association records carry **no** `QOS=` field, and `users=` does **not** filter the QOS section. The user's default account is therefore matched against each QOS's `Account Limits` block (`qos_names_for_account`), and `rcl` prints every matching QOS. These cache matches do not identify the default QOS or establish which QOSs the user may use.
+- `MaxJobsPU` / `MaxSubmitJobsPU` are only rendered inside per-user entries under `User Limits`, and a user with no tracked jobs has no entry at all. Since a QOS applies one value to every user, `qos_user_limits` falls back to another user's entry for the limits — take only the limit, never the parenthesised usage, which is that other user's. If no entry supplies a limit, show `?`. Live usage for the caller comes from `squeue` via `fetch_user_job_counts`, scoped to the user and each QOS across all accounts.
 
 ### Testing
 

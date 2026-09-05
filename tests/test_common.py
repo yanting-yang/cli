@@ -336,15 +336,17 @@ class QosLookupTests(unittest.TestCase):
         self.records = common.parse_qos_records(ASSOC_MGR)
 
     def test_maps_an_account_to_its_qos(self):
-        self.assertEqual(common.qos_for_account(self.records, "guests"), "limited")
+        self.assertEqual(common.qos_names_for_account(self.records, "guests"), ["limited"])
 
-    def test_returns_none_for_an_unknown_account(self):
-        self.assertIsNone(common.qos_for_account(self.records, "other"))
+    def test_returns_empty_list_for_an_unknown_account(self):
+        self.assertEqual(common.qos_names_for_account(self.records, "other"), [])
 
-    def test_returns_none_when_several_qos_share_an_account(self):
+    def test_returns_sorted_names_when_several_qos_share_an_account(self):
         self.records["normal"]["accounts"].add("guests")
 
-        self.assertIsNone(common.qos_for_account(self.records, "guests"))
+        self.assertEqual(
+            common.qos_names_for_account(self.records, "guests"), ["limited", "normal"]
+        )
 
     def test_prefers_the_users_own_limits(self):
         record = self.records["limited"]
@@ -393,6 +395,27 @@ class UserJobCountTests(unittest.TestCase):
             common.fetch_user_job_counts("me"),
             {"running": 2, "pending": 1, "total": 4},
         )
+        run_mock.assert_called_once_with(
+            ["squeue", "-h", "-u", "me", "-o", "%t"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    @patch.object(common.subprocess, "run")
+    def test_filters_jobs_by_qos_without_restricting_account(self, run_mock):
+        run_mock.return_value = Mock(stdout="R\nPD\n", stderr="", returncode=0)
+
+        self.assertEqual(
+            common.fetch_user_job_counts("me", qos="opportunistic"),
+            {"running": 1, "pending": 1, "total": 2},
+        )
+        run_mock.assert_called_once_with(
+            ["squeue", "-h", "-u", "me", "-o", "%t", "--qos", "opportunistic"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
 
     @patch.object(common.subprocess, "run")
     def test_counts_an_empty_queue_as_zero(self, run_mock):
@@ -406,6 +429,14 @@ class UserJobCountTests(unittest.TestCase):
     def test_reports_none_when_squeue_is_missing(self):
         with patch.object(common.subprocess, "run", side_effect=FileNotFoundError):
             self.assertIsNone(common.fetch_user_job_counts("me"))
+
+    def test_reports_none_when_qos_filtered_query_fails(self):
+        with patch.object(
+            common.subprocess,
+            "run",
+            side_effect=subprocess.CalledProcessError(1, "squeue"),
+        ):
+            self.assertIsNone(common.fetch_user_job_counts("me", qos="opportunistic"))
 
 
 SINFO_PARTITIONS = (

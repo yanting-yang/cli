@@ -327,12 +327,11 @@ def parse_qos_records(output):
     return records
 
 
-def qos_for_account(qos_records, account):
-    """Return the single QOS governing `account`, or None when ambiguous."""
-    matches = sorted(
+def qos_names_for_account(qos_records, account):
+    """Return every QOS listing `account`, sorted by name."""
+    return sorted(
         name for name, record in qos_records.items() if account in record["accounts"]
     )
-    return matches[0] if len(matches) == 1 else None
 
 
 def qos_user_limits(record, user):
@@ -365,11 +364,14 @@ def fetch_assoc_mgr():
     return result.stdout
 
 
-def fetch_user_job_counts(user):
-    """Count the user's running and pending jobs, or None when unavailable."""
+def fetch_user_job_counts(user, qos=None):
+    """Count the user's jobs, optionally within one QOS, or None if unavailable."""
+    command = ["squeue", "-h", "-u", user, "-o", "%t"]
+    if qos is not None:
+        command.extend(["--qos", qos])
     try:
         result = subprocess.run(
-            ["squeue", "-h", "-u", user, "-o", "%t"],
+            command,
             capture_output=True,
             text=True,
             check=True,

@@ -1,4 +1,4 @@
-"""Reporter for the `rcl` cluster (UBC ECE, single B200 node with MIG slices)."""
+"""Reporter for the RCL servers (UBC ECE, GPU nodes with MIG slices)."""
 
 from . import common
 
@@ -80,11 +80,10 @@ def format_limit(value):
 
 
 def print_account_limits(user):
-    """Report the QOS caps that govern what this user can actually submit.
+    """Report caps for each QOS listing the user's default account.
 
-    rcl enforces per-account caps through a QOS rather than through anything
-    visible in `scontrol show node`, so the resource tables above can show
-    capacity this account is not allowed to ask for.
+    The controller cache can list an account under several QOS records; each
+    gets its own table because their limits and usage are independent.
     """
     output = common.fetch_assoc_mgr()
     if output is None:
@@ -97,24 +96,31 @@ def print_account_limits(user):
         return
 
     qos_records = common.parse_qos_records(output)
-    qos_name = common.qos_for_account(qos_records, account)
-    if qos_name is None:
-        print(f"Account limits: no single QOS found for account '{account}'.\n")
+    qos_names = common.qos_names_for_account(qos_records, account)
+    if not qos_names:
+        print(f"Account limits: no QOS found for account '{account}'.\n")
         return
 
-    record = qos_records[qos_name]
+    for qos_name in qos_names:
+        counts = common.fetch_user_job_counts(user, qos=qos_name) or {}
+        print_qos_limits(account, qos_name, qos_records[qos_name], user, counts)
+
+
+def print_qos_limits(account, qos_name, record, user, counts):
+    """Print one QOS's caps and the caller's usage within that QOS."""
     limits = common.qos_user_limits(record, user)
-    counts = common.fetch_user_job_counts(user) or {}
 
     rows = [
         (
             "Jobs running",
-            format_limit(limits.get("max_jobs")),
+            format_limit(limits["max_jobs"]) if "max_jobs" in limits else "?",
             counts.get("running", "?"),
         ),
         (
             "Jobs submitted",
-            format_limit(limits.get("max_submit_jobs")),
+            format_limit(limits["max_submit_jobs"])
+            if "max_submit_jobs" in limits
+            else "?",
             counts.get("total", "?"),
         ),
     ]
