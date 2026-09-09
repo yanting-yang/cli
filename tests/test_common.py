@@ -1,4 +1,5 @@
 import subprocess
+import shlex
 import unittest
 from unittest.mock import Mock, patch
 
@@ -386,6 +387,205 @@ class QosLookupTests(unittest.TestCase):
         self.assertEqual(common.qos_user_limits({"user_limits": {}}, "me"), {})
 
 
+class ParseUserAccountsTests(unittest.TestCase):
+    def test_returns_every_current_user_account(self):
+        self.assertEqual(
+            common.parse_user_accounts(ASSOC_MGR, "yanting.yang"), ["guests", "staff"]
+        )
+
+    def test_matches_exact_user_and_deduplicates_partition_associations(self):
+        output = """Association Records
+ClusterName=killarney Account=project UserName=me(123) Partition= ID=1
+ClusterName=killarney Account=project UserName=me(123) Partition=gpu ID=2
+ClusterName=killarney Account=other UserName=someone(124) Partition= ID=3
+ClusterName=killarney Account=prefix UserName=me.extra(125) Partition= ID=4
+ClusterName=killarney Account=parent UserName= Partition= ID=5
+QOS Records
+ClusterName=killarney Account=outside UserName=me(123) Partition= ID=6
+"""
+
+        self.assertEqual(common.parse_user_accounts(output, "me"), ["project"])
+        self.assertEqual(common.parse_user_accounts(output, "missing"), [])
+        self.assertEqual(common.parse_user_accounts("", "me"), [])
+
+
+class ParseAccountQosTests(unittest.TestCase):
+    def test_combines_duplicate_associations_and_sorts_qos_names(self):
+        output = (
+            "project|normal,interac|\n"
+            "project|normal,extra|\n"
+            "other|normal|\n"
+            "project|normal|\n"
+        )
+
+        self.assertEqual(
+            common.parse_account_qos(output),
+            {"other": ["normal"], "project": ["extra", "interac", "normal"]},
+        )
+
+    def test_preserves_accounts_with_no_qos_and_ignores_invalid_rows(self):
+        self.assertEqual(
+            common.parse_account_qos("empty||\n spaced | normal, interac |\n|normal|\ninvalid\n"),
+            {"empty": [], "spaced": ["interac", "normal"]},
+        )
+        self.assertEqual(common.parse_account_qos(""), {})
+
+
+MULTI_ACCOUNT_QOS = """QOS Records
+QOS=normal(1)
+    MaxWallPJ=
+    MaxTRESPJ=cpu=64
+    MaxTRESPN=gres/gpu=4,gres/gpu:h100=2
+    Account Limits
+      project-a
+        MaxJobsPA=16(3) MaxJobsAccruePA=N(0) MaxSubmitJobsPA=N(6)
+        MaxTRESPA=cpu=128(24),mem=N(65536),gres/gpu=0(0),gres/gpu:h100=2(1)
+      project-b
+        MaxJobsPA=16(1) MaxSubmitJobsPA=N(2)
+        MaxTRESPA=cpu=128(8),mem=N(16384),gres/gpu=0(0),gres/gpu:h100=2(0)
+    User Limits
+      other(456)
+        MaxJobsPU=4(1) MaxSubmitJobsPU=8(2)
+        MaxTRESPU=cpu=64(8),gres/gpu=2(1)
+QOS=interac(2)
+    MaxWallPJ=180
+    MaxTRESPJ=gres/gpu=1
+    Account Limits
+      project-a
+        MaxJobsPA=0(0) MaxSubmitJobsPA=bad(9)
+        MaxTRESPA=cpu=bad(4),mem=0(0)
+      project-c
+    User Limits
+"""
+
+
+class QosAccountLimitTests(unittest.TestCase):
+    def setUp(self):
+        self.records = common.parse_qos_records(MULTI_ACCOUNT_QOS)
+
+    def test_parses_per_account_caps_separately_from_account_usage(self):
+        record = self.records["normal"]
+        self.assertEqual(
+            record["account_limits"]["project-a"],
+            {
+                "max_jobs": 16,
+                "max_submit_jobs": None,
+                "max_tres_pa": {
+                    "cpu": 128, "mem": None, "gres/gpu": 0, "gres/gpu:h100": 2,
+                },
+            },
+        )
+        self.assertEqual(record["accounts"], {"project-a", "project-b"})
+        self.assertEqual(
+            record["account_job_usage"],
+            {"project-a": {"running": 3, "total": 6}, "project-b": {"running": 1, "total": 2}},
+        )
+        self.assertEqual(
+            record["account_tres_usage"],
+            {
+                "project-a": {"cpu": 24, "mem": 65536, "gres/gpu": 0, "gres/gpu:h100": 1},
+                "project-b": {"cpu": 8, "mem": 16384, "gres/gpu": 0, "gres/gpu:h100": 0},
+            },
+        )
+        self.assertEqual(record["user_tres_usage"], {"other": {"cpu": 8, "gres/gpu": 1}})
+
+    def test_keeps_qos_records_separate_and_preserves_zero_and_missing_caps(self):
+        record = self.records["interac"]
+        self.assertEqual(
+            record["account_limits"],
+            {"project-a": {"max_jobs": 0, "max_tres_pa": {"mem": 0}}, "project-c": {}},
+        )
+        self.assertEqual(record["account_job_usage"], {"project-a": {"running": 0}})
+        self.assertEqual(record["account_tres_usage"], {"project-a": {"mem": 0}})
+
+    def test_reads_per_node_caps_and_per_job_time_in_minutes(self):
+        self.assertEqual(
+            self.records["normal"]["max_tres_pn"], {"gres/gpu": 4, "gres/gpu:h100": 2}
+        )
+        self.assertIsNone(self.records["normal"]["max_wall_pj"])
+        self.assertEqual(self.records["interac"]["max_tres_pn"], {})
+        self.assertEqual(self.records["interac"]["max_wall_pj"], 180)
+        self.assertEqual(
+            common.parse_qos_records(MULTI_ACCOUNT_QOS.replace("MaxWallPJ=180", "MaxWallPJ=0"))[
+                "interac"
+            ]["max_wall_pj"],
+            0,
+        )
+
+    def test_distinguishes_missing_or_malformed_time_from_unset_time(self):
+        output = """QOS Records
+QOS=missing(1)
+    MaxTRESPJ=
+QOS=malformed(2)
+    MaxWallPJ=invalid
+QOS=unset(3)
+    MaxWallPJ=N
+"""
+        records = common.parse_qos_records(output)
+
+        self.assertNotIn("max_wall_pj", records["missing"])
+        self.assertNotIn("max_wall_pj", records["malformed"])
+        self.assertIsNone(records["unset"]["max_wall_pj"])
+
+    def test_prefers_requested_accounts_limits(self):
+        record = self.records["normal"]
+        record["account_limits"]["project-b"]["max_jobs"] = 7
+
+        self.assertEqual(common.qos_account_limits(record, "project-b")["max_jobs"], 7)
+
+    def test_borrows_only_caps_when_the_account_has_no_cached_usage(self):
+        record = self.records["normal"]
+        self.assertEqual(
+            common.qos_account_limits(record, "inactive"), record["account_limits"]["project-a"]
+        )
+        self.assertNotIn("inactive", record["account_job_usage"])
+        self.assertNotIn("inactive", record["account_tres_usage"])
+        self.assertEqual(record["account_job_usage"]["project-a"], {"running": 3, "total": 6})
+
+    def test_returns_unknown_caps_if_no_account_entry_has_limits(self):
+        self.assertEqual(common.qos_account_limits({"account_limits": {}}, "inactive"), {})
+        self.assertEqual(
+            common.qos_account_limits({"account_limits": {"other": {}}}, "inactive"), {}
+        )
+
+
+class FetchUserAccountQosTests(unittest.TestCase):
+    @patch.object(common.subprocess, "run")
+    def test_fetches_full_qos_names_for_the_current_user_and_cluster(self, run_mock):
+        run_mock.return_value = Mock(stdout="project|normal,interac|\n", returncode=0)
+
+        self.assertEqual(
+            common.fetch_user_account_qos("me", "killarney"),
+            {"project": ["interac", "normal"]},
+        )
+        run_mock.assert_called_once_with(
+            [
+                "sacctmgr", "-nP", "show", "assoc", "where", "user=me",
+                "cluster=killarney", "format=Account,QOS%1000",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+
+    @patch.object(common.subprocess, "run")
+    def test_distinguishes_no_associations_from_a_failed_query(self, run_mock):
+        run_mock.return_value = Mock(stdout="", returncode=0)
+        self.assertEqual(common.fetch_user_account_qos("me", "killarney"), {})
+
+    def test_reports_unavailable_when_command_is_missing_fails_or_times_out(self):
+        for error in (
+            FileNotFoundError(),
+            subprocess.CalledProcessError(1, "sacctmgr"),
+            subprocess.TimeoutExpired("sacctmgr", 10),
+        ):
+            with self.subTest(error=type(error).__name__), patch.object(
+                common.subprocess, "run", side_effect=error
+            ):
+                self.assertIsNone(common.fetch_user_account_qos("me", "killarney"))
+
+
 class UserJobCountTests(unittest.TestCase):
     @patch.object(common.subprocess, "run")
     def test_counts_running_and_pending_jobs(self, run_mock):
@@ -587,6 +787,21 @@ class RunSrunTestTests(unittest.TestCase):
             run_mock.call_args.args[0],
             ["srun", "--test-only", "--gres=gpu:l40s:1", "--time=3:00:00"],
         )
+
+
+class FormatRunCommandTests(unittest.TestCase):
+    def test_quotes_shell_metacharacters_and_preserves_original_probe(self):
+        directives = ["--test-only", "--comment=two words; echo $HOME", "--time=3:00:00"]
+        original = directives.copy()
+
+        command = common.format_run_command("sbatch", directives)
+
+        self.assertEqual(
+            shlex.split(command),
+            ["sbatch", "--comment=two words; echo $HOME", "--time=3:00:00", "job.sh"],
+        )
+        self.assertIn("'--comment=two words; echo $HOME'", command)
+        self.assertEqual(directives, original)
 
 
 if __name__ == "__main__":

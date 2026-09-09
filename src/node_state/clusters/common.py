@@ -2,6 +2,7 @@
 
 import getpass
 import re
+import shlex
 import subprocess
 from collections import Counter, defaultdict
 
@@ -257,6 +258,41 @@ def parse_default_account(output, user):
     return fallback
 
 
+def parse_user_accounts(output, user):
+    """Return all accounts associated with exactly `user` in the cache."""
+    accounts = set()
+    in_associations = False
+    for line in output.splitlines():
+        if line.strip() == "Association Records":
+            in_associations = True
+            continue
+        if line.strip() == "QOS Records":
+            break
+        if not in_associations or not line.startswith("ClusterName="):
+            continue
+        username = re.search(r"\bUserName=(\S*)", line)
+        account = re.search(r"\bAccount=(\S+)", line)
+        if username is None or account is None:
+            continue
+        if re.sub(r"\(\d+\)$", "", username.group(1)) == user:
+            accounts.add(account.group(1))
+    return sorted(accounts)
+
+
+def parse_account_qos(output):
+    """Parse `sacctmgr -nP ... format=Account,QOS` association rows."""
+    accounts = {}
+    for line in output.splitlines():
+        fields = line.split("|")
+        if len(fields) < 2 or not fields[0].strip():
+            continue
+        account, qos = fields[0].strip(), fields[1].strip()
+        accounts.setdefault(account, set()).update(
+            name.strip() for name in qos.split(",") if name.strip()
+        )
+    return {account: sorted(names) for account, names in sorted(accounts.items())}
+
+
 def parse_qos_records(output):
     """Parse the `QOS Records` section of `scontrol show assoc_mgr` output.
 
@@ -264,12 +300,16 @@ def parse_qos_records(output):
     `user_limits` keyed by user with `max_jobs`, `max_submit_jobs`, and
     per-user `max_tres_pu` caps. A limit of None means no QOS cap is set.
     Resource usage is kept separately in `user_tres_usage`, keyed by user,
-    so borrowing another user's limits never borrows their usage.
+    so borrowing another user's limits never borrows their usage. The parallel
+    `account_limits`, `account_job_usage`, and `account_tres_usage` mappings
+    hold per-account caps and each account's own usage. `max_tres_pn` holds
+    per-node caps, and `max_wall_pj` is a per-job time cap in minutes.
     """
     records = {}
     record = None
     subsection = None
     user = None
+    account = None
     in_qos_section = False
 
     for line in output.splitlines():
@@ -284,13 +324,18 @@ def parse_qos_records(output):
         if match:
             record = {
                 "max_tres_pj": {},
+                "max_tres_pn": {},
                 "accounts": set(),
+                "account_limits": {},
+                "account_job_usage": {},
+                "account_tres_usage": {},
                 "user_limits": {},
                 "user_tres_usage": {},
             }
             records[match.group(1)] = record
             subsection = None
             user = None
+            account = None
             continue
         if record is None:
             continue
@@ -304,10 +349,39 @@ def parse_qos_records(output):
         if line.startswith("    MaxTRESPJ="):
             record["max_tres_pj"] = parse_tres_values(stripped.partition("=")[2])
             continue
+        if line.startswith("    MaxTRESPN="):
+            record["max_tres_pn"] = parse_tres_values(stripped.partition("=")[2])
+            continue
+        if line.startswith("    MaxWallPJ="):
+            value = stripped.partition("=")[2]
+            if value.isdigit():
+                record["max_wall_pj"] = int(value)
+            elif value in ("", "N"):
+                record["max_wall_pj"] = None
+            continue
 
         indent = len(line) - len(line.lstrip())
         if subsection == "accounts" and indent == 6:
-            record["accounts"].add(stripped)
+            account = stripped
+            record["accounts"].add(account)
+            record["account_limits"].setdefault(account, {})
+        elif subsection == "accounts" and indent == 8 and account:
+            limits = record["account_limits"][account]
+            for field, key, usage_key in (
+                ("MaxJobsPA", "max_jobs", "running"),
+                ("MaxSubmitJobsPA", "max_submit_jobs", "total"),
+            ):
+                match = re.search(rf"\b{field}=(N|\d+)\((\d+)\)(?=\s|$)", line)
+                if match:
+                    limits[key] = None if match.group(1) == "N" else int(match.group(1))
+                    record["account_job_usage"].setdefault(account, {})[usage_key] = int(
+                        match.group(2)
+                    )
+            match = re.search(r"\bMaxTRESPA=(\S*)", line)
+            if match:
+                tres_limits, usage = parse_tres_limits(match.group(1))
+                limits["max_tres_pa"] = tres_limits
+                record["account_tres_usage"][account] = usage
         elif subsection == "users" and indent == 6:
             user = re.sub(r"\(\d+\)$", "", stripped)
             record["user_limits"].setdefault(user, {})
@@ -350,6 +424,112 @@ def qos_user_limits(record, user):
     return {}
 
 
+def qos_account_limits(record, account):
+    """Return QOS per-account caps, borrowing only caps from a tracked account."""
+    limits = record["account_limits"].get(account)
+    if limits:
+        return limits
+    for other in record["account_limits"].values():
+        if other:
+            return other
+    return {}
+
+
+def format_qos_limit(limits, key, scale=1):
+    if key not in limits:
+        return "?"
+    value = limits[key]
+    return "no limit" if value is None else f"{value / scale:g}"
+
+
+def qos_resource_rows(scope, limits, usage=None, *, include_unset=False):
+    """Keep GPU totals and model caps separate, and convert memory from MB."""
+    resources = [
+        (f"CPUs per {scope}", "cpu", 1),
+        (f"Memory per {scope} (GB)", "mem", 1024),
+        (f"Nodes per {scope}", "node", 1),
+        (f"GPUs per {scope}", "gres/gpu", 1),
+    ]
+    resources += [
+        (f"{tres.removeprefix('gres/gpu:')} per {scope}", tres, 1)
+        for tres in sorted(set(limits) | set(usage or {}))
+        if tres.startswith("gres/gpu:")
+    ]
+    rows = []
+    for label, tres, scale in resources:
+        if not include_unset and limits.get(tres) is None:
+            continue
+        in_use = "-" if usage is None else usage.get(tres, "?")
+        if isinstance(in_use, int):
+            in_use = f"{in_use / scale:g}"
+        rows.append((label, format_qos_limit(limits, tres, scale), in_use))
+    return rows
+
+
+def print_account_qos_limits(account, qos_name, record, user, counts):
+    account_limits = qos_account_limits(record, account)
+    user_limits = qos_user_limits(record, user)
+    rows = []
+    for scope, limits, usage in [
+        ("account", account_limits, record["account_job_usage"].get(account, {})),
+        ("user", user_limits, counts),
+    ]:
+        rows += [
+            (
+                f"Jobs running per {scope}",
+                format_qos_limit(limits, "max_jobs"),
+                usage.get("running", "?"),
+            ),
+            (
+                f"Jobs submitted per {scope}",
+                format_qos_limit(limits, "max_submit_jobs"),
+                usage.get("total", "?"),
+            ),
+        ]
+    rows += qos_resource_rows(
+        "account",
+        account_limits.get("max_tres_pa", {}),
+        record["account_tres_usage"].get(account, {}),
+        include_unset=True,
+    )
+    rows += qos_resource_rows(
+        "user",
+        user_limits.get("max_tres_pu", {}),
+        record["user_tres_usage"].get(user, {}),
+        include_unset=True,
+    )
+    rows += qos_resource_rows("job", record["max_tres_pj"])
+    rows += qos_resource_rows("node", record["max_tres_pn"])
+    rows.append(
+        ("Wall time per job (minutes)", format_qos_limit(record, "max_wall_pj"), "-")
+    )
+
+    print(f"Account limits (account={account}, QOS={qos_name}):")
+    print_table(["Limit", "Value", "In use"], rows)
+    print()
+
+
+def fetch_user_account_qos(user, cluster):
+    """Return allowed QOS names by user account, or None if accounting fails."""
+    command = [
+        "sacctmgr",
+        "-nP",
+        "show",
+        "assoc",
+        "where",
+        f"user={user}",
+        f"cluster={cluster}",
+        "format=Account,QOS%1000",
+    ]
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, check=True, timeout=10
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    return parse_account_qos(result.stdout)
+
+
 def fetch_assoc_mgr():
     """Return `scontrol show assoc_mgr` output, or None when unavailable."""
     try:
@@ -385,6 +565,13 @@ def fetch_user_job_counts(user, qos=None):
         "pending": states.count("PD"),
         "total": len(states),
     }
+
+
+def format_run_command(command, directives):
+    """Format a runnable batch-script or interactive-shell request for copying."""
+    arguments = [command, *(arg for arg in directives if arg != "--test-only")]
+    arguments += ["--pty", "bash"] if command == "srun" else ["job.sh"]
+    return shlex.join(arguments)
 
 
 def run_sbatch_test(directives, timeout=30):

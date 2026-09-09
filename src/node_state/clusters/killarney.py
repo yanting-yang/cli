@@ -55,21 +55,21 @@ def run_probes(
     results = []
     for gpu, count, label in requests:
         for time_limit in PROBE_TIMES:
-            result = common.run_sbatch_test(
-                build_directives(
-                    gpu,
-                    count,
-                    time_limit,
-                    cpus_per_task=cpus_per_task,
-                    mem=mem,
-                )
+            directives = build_directives(
+                gpu,
+                count,
+                time_limit,
+                cpus_per_task=cpus_per_task,
+                mem=mem,
             )
+            result = common.run_sbatch_test(directives)
             results.append(
                 {
                     **result,
                     "label": label,
                     "time": time_limit,
                     "command": "sbatch",
+                    "run_command": common.format_run_command("sbatch", directives),
                 }
             )
 
@@ -82,21 +82,21 @@ def run_probes(
     interactive_requests.append((None, 1, "CPU only (no GPU)"))
 
     for gpu, count, label in interactive_requests:
-        result = common.run_srun_test(
-            build_directives(
-                gpu,
-                count,
-                INTERACTIVE_TIME,
-                cpus_per_task=cpus_per_task,
-                mem=mem,
-            )
+        directives = build_directives(
+            gpu,
+            count,
+            INTERACTIVE_TIME,
+            cpus_per_task=cpus_per_task,
+            mem=mem,
         )
+        result = common.run_srun_test(directives)
         results.append(
             {
                 **result,
                 "label": label,
                 "time": INTERACTIVE_TIME,
                 "command": "srun",
+                "run_command": common.format_run_command("srun", directives),
             }
         )
     return results
@@ -119,6 +119,52 @@ def print_partition_table():
     print("Partitions:")
     common.print_table(columns, rows)
     print()
+
+
+def print_account_limits(user):
+    """Report each of the caller's accounts and its QOS caps and usage."""
+    output = common.fetch_assoc_mgr()
+    if output is None:
+        print("Account limits: unavailable ('scontrol show assoc_mgr' failed).\n")
+        return
+
+    records = common.parse_qos_records(output)
+    account_qos = common.fetch_user_account_qos(user, "killarney")
+    if account_qos is None:
+        account_qos = {
+            account: common.qos_names_for_account(records, account)
+            for account in common.parse_user_accounts(output, user)
+        }
+        print(
+            "Account limits: using cached QOS matches; "
+            "these may be incomplete and do not establish QOS permissions."
+        )
+    if not account_qos:
+        print(f"Account limits: no Slurm association found for '{user}'.\n")
+        return
+
+    print(f"QOS limits for {user}:")
+    print("Account usage covers all users; user usage covers all accounts in the QOS.")
+    print("'no limit' means no cap at this QOS scope; other Slurm limits may apply.")
+    print("'?' means the limit or usage is unavailable.\n")
+    counts_by_qos = {}
+    for account, qos_names in sorted(account_qos.items()):
+        if not qos_names:
+            print(f"Account limits: no QOS found for account '{account}'.\n")
+        for qos_name in sorted(qos_names):
+            if qos_name not in records:
+                print(
+                    f"Account limits (account={account}, QOS={qos_name}): "
+                    "unavailable in the controller cache.\n"
+                )
+                continue
+            if qos_name not in counts_by_qos:
+                counts_by_qos[qos_name] = (
+                    common.fetch_user_job_counts(user, qos=qos_name) or {}
+                )
+            common.print_account_qos_limits(
+                account, qos_name, records[qos_name], user, counts_by_qos[qos_name]
+            )
 
 
 def print_probe_results(
@@ -150,13 +196,20 @@ def print_probe_results(
             "yes" if result["start_time"] else "no",
             result["start_time"] or "-",
             result["partition"] or "-",
+            result["run_command"],
         )
         for result in displayed_results
     ]
     common.print_table(
-        ["Request", "Time", "Command", "Can run", "Estimated start", "Partition"],
+        [
+            "Request", "Time", "Command", "Can run", "Estimated start", "Partition",
+            "Run command",
+        ],
         rows,
     )
+    print()
+
+    print("Run command: replace job.sh with your batch script; srun opens a Bash shell.")
     print()
 
     blocked = [result for result in results if result["start_time"] is None]
@@ -188,6 +241,7 @@ def main(args):
         )
 
     print_partition_table()
+    print_account_limits(common.current_user())
 
     gpu_types = sorted({gpu for node in nodes for gpu in node["cfg_gpus"]})
     gpu_capacities = {

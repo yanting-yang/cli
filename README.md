@@ -68,6 +68,26 @@ count, and time limit. That is what makes the `Partition` column of the
 feasibility table readable: Killarney routes by duration, and interactive work
 lands in `gpubase_interac` rather than a `_b1`-`_b5` batch partition.
 
+It also prints a separate **Account limits** table for each QOS assigned to each
+of your Slurm accounts. Account/QOS assignments come from `sacctmgr`, and limits
+and account usage come from `scontrol show assoc_mgr`. The tables distinguish
+per-account and per-user running/submitted job caps, CPU/memory/node/GPU caps,
+per-job and per-node resource caps, and the maximum wall time per job. Account
+usage includes everyone using that account in the QOS; user usage spans all of
+your accounts in that QOS. Your running/submitted job counts come from `squeue`.
+
+For example, Killarney's `interac` QOS currently limits each user to one running
+job and one node, with a 180-minute wall-time limit. The values are read on every
+run. `no limit` means no cap at that QOS scope; [association and partition limits](https://slurm.schedmd.com/resource_limits.html)
+can still apply. Missing limits or usage are shown as `?`. If your account or
+user has no cache entry, another entry may supply the QOS's common limits, but
+its usage is never shown as yours.
+
+If `sacctmgr` is unavailable, the report falls back to your accounts and their
+QOS matches in the controller cache, with a note that these matches can be
+incomplete and do not establish QOS permissions. If the controller cache is
+unavailable, it prints a short note and continues with the rest of the report.
+
 It then runs `sbatch --test-only` requests for every GPU count
 available on one node (1-8 H100s and 1-4 L40Ss), plus CPU-only requests. Each
 request is checked at 3 hours, 12 hours, 1 day, 3 days, and 7 days. It leaves
@@ -76,6 +96,12 @@ hardware and duration partition. It also tests interactive `srun` feasibility
 for 1-4 L40Ss and one CPU-only request at 3 hours. Both commands use
 `--test-only`, so no job starts. All results share one table whose `Command`,
 `Time`, selected partition, and estimated start columns make the routing visible.
+
+The `Run command` column provides the same resource and time request as a
+copyable command: `sbatch ... job.sh` for batch jobs (replace `job.sh` with your
+script), or `srun ... --pty bash` for an interactive shell. These displayed
+commands omit `--test-only` and submit or run the request when you execute them.
+They leave partition selection to Killarney's routing rules.
 
 The probes request 4 CPUs and 32 GB of memory by default. Override those resources
 and sort the table from earliest to latest estimated start with:
