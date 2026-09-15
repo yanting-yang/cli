@@ -1,12 +1,16 @@
 import argparse
 
-from .clusters import fallback, killarney, rcl, vulcan
+from .clusters import fallback, killarney, rcl, tamia, vulcan
 
 CLUSTER_RUNNERS = {
     "killarney": killarney.main,
     "rcl": rcl.main,
+    "tamia": tamia.main,
     "vulcan": vulcan.main,
 }
+
+# Clusters whose reporters run the resizable feasibility probes.
+PROBE_CLUSTERS = ("killarney", "tamia")
 
 
 def main(argv=None):
@@ -18,22 +22,23 @@ def main(argv=None):
         for cluster_name in cluster_names
     }
 
-    killarney_parser = cluster_parsers["killarney"]
-    killarney_parser.add_argument(
-        "--cpus-per-task",
-        type=int,
-        default=4,
-        metavar="4",
-    )
-    killarney_parser.add_argument(
-        "--mem",
-        default="32G",
-        metavar="32G",
-    )
-    killarney_parser.add_argument(
-        "--sort-by-start",
-        action="store_true",
-    )
+    for cluster_name in PROBE_CLUSTERS:
+        probe_parser = cluster_parsers[cluster_name]
+        probe_parser.add_argument(
+            "--cpus-per-task",
+            type=int,
+            default=4,
+            metavar="4",
+        )
+        probe_parser.add_argument(
+            "--mem",
+            default="32G",
+            metavar="32G",
+        )
+        probe_parser.add_argument(
+            "--sort-by-start",
+            action="store_true",
+        )
 
     args = parser.parse_args(argv)
 

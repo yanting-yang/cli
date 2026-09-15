@@ -4,7 +4,7 @@ from io import StringIO
 from unittest.mock import Mock, patch
 
 from node_state import cli
-from node_state.clusters import killarney
+from node_state.clusters import killarney, tamia
 
 
 class CliTests(unittest.TestCase):
@@ -18,6 +18,19 @@ class CliTests(unittest.TestCase):
 
     def test_registers_killarney(self):
         self.assertIs(cli.CLUSTER_RUNNERS["killarney"], killarney.main)
+
+    def test_registers_tamia(self):
+        self.assertIs(cli.CLUSTER_RUNNERS["tamia"], tamia.main)
+
+    def test_forwards_tamia_probe_options(self):
+        runner = Mock()
+        with patch.dict(cli.CLUSTER_RUNNERS, {"tamia": runner}):
+            cli.main(["tamia", "--cpus-per-task", "8", "--mem", "64G", "--sort-by-start"])
+
+        args = runner.call_args.args[0]
+        self.assertEqual(args.cpus_per_task, 8)
+        self.assertEqual(args.mem, "64G")
+        self.assertTrue(args.sort_by_start)
 
     def test_uses_fallback_when_cluster_is_omitted(self):
         runner = Mock()
@@ -70,7 +83,7 @@ class CliTests(unittest.TestCase):
             cli.main(["--help"])
 
         self.assertEqual(raised.exception.code, 0)
-        self.assertIn("{killarney,rcl,vulcan}", top_level_output.getvalue())
+        self.assertIn("{killarney,rcl,tamia,vulcan}", top_level_output.getvalue())
         self.assertNotIn("--cpus-per-task", top_level_output.getvalue())
 
         killarney_output = StringIO()

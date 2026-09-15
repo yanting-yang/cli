@@ -602,11 +602,15 @@ def run_sbatch_test(directives, timeout=30):
     return parse_scheduling_test_result(completed, "sbatch")
 
 
-def run_srun_test(directives, timeout=30):
-    """Run an `srun --test-only` probe without starting an interactive job."""
+def run_srun_test(directives, timeout=30, command=()):
+    """Run an `srun --test-only` probe without starting an interactive job.
+
+    `command` is appended after the directives for sites whose submit filter
+    only routes an srun request that names a program.
+    """
     try:
         completed = subprocess.run(
-            ["srun", *directives],
+            ["srun", *directives, *command],
             capture_output=True,
             text=True,
             timeout=timeout,

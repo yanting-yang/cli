@@ -17,6 +17,7 @@ Current commands:
 - [src/node_state/clusters/killarney.py](src/node_state/clusters/killarney.py) — reporter for `killarney`
 - [src/node_state/clusters/vulcan.py](src/node_state/clusters/vulcan.py) — reporter for `vulcan`
 - [src/node_state/clusters/rcl.py](src/node_state/clusters/rcl.py) — reporter for `rcl`
+- [src/node_state/clusters/tamia.py](src/node_state/clusters/tamia.py) — reporter for `tamia`; reuses `killarney`'s partition, account-limit and probe-report output, but probes only whole GPU nodes (partial GPU requests are rejected), stops at the 1-day walltime cap, and passes a program to `srun` because the submit filter otherwise finds no partition
 - [tests/](tests/) — `unittest` suite; one module per source module
 
 ## Commands
@@ -25,6 +26,7 @@ Current commands:
 uv sync                      # install/refresh the environment
 uv run node_state            # generic summary (needs scontrol)
 uv run node_state killarney  # Killarney-specific summary and probes
+uv run node_state tamia      # Tamia summary and probes (same options as killarney)
 uv run python -m unittest discover -s tests -t tests   # run the tests
 ```
 

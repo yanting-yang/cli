@@ -788,6 +788,17 @@ class RunSrunTestTests(unittest.TestCase):
             ["srun", "--test-only", "--gres=gpu:l40s:1", "--time=3:00:00"],
         )
 
+    @patch.object(common.subprocess, "run")
+    def test_appends_the_program_after_the_directives(self, run_mock):
+        run_mock.return_value = Mock(stdout="", stderr="", returncode=1)
+
+        common.run_srun_test(["--test-only", "--time=3:00:00"], command=("bash",))
+
+        self.assertEqual(
+            run_mock.call_args.args[0],
+            ["srun", "--test-only", "--time=3:00:00", "bash"],
+        )
+
 
 class FormatRunCommandTests(unittest.TestCase):
     def test_quotes_shell_metacharacters_and_preserves_original_probe(self):

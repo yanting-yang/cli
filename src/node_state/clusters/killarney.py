@@ -121,7 +121,7 @@ def print_partition_table():
     print()
 
 
-def print_account_limits(user):
+def print_account_limits(user, cluster="killarney"):
     """Report each of the caller's accounts and its QOS caps and usage."""
     output = common.fetch_assoc_mgr()
     if output is None:
@@ -129,7 +129,7 @@ def print_account_limits(user):
         return
 
     records = common.parse_qos_records(output)
-    account_qos = common.fetch_user_account_qos(user, "killarney")
+    account_qos = common.fetch_user_account_qos(user, cluster)
     if account_qos is None:
         account_qos = {
             account: common.qos_names_for_account(records, account)
@@ -173,6 +173,7 @@ def print_probe_results(
     cpus_per_task,
     mem,
     sort_by_start=False,
+    clean=clean_result,
 ):
     runnable = sum(result["start_time"] is not None for result in results)
     print(f"Job feasibility (--test-only, {cpus_per_task} CPUs, " f"{mem}):")
@@ -218,7 +219,7 @@ def print_probe_results(
         for result in blocked:
             print(
                 f"  {result['command']} {result['label']} for {result['time']}: "
-                f"{clean_result(result['result'])}"
+                f"{clean(result['result'])}"
             )
         print()
 
