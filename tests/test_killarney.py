@@ -107,7 +107,11 @@ class RunProbesTests(unittest.TestCase):
                               command=result["command"]):
                 arguments = shlex.split(result["run_command"])
                 self.assertEqual(arguments[0], result["command"])
-                suffix = ["--pty", "bash"] if result["command"] == "srun" else ["job.sh"]
+                suffix = (
+                    ["--pty", "bash"]
+                    if result["command"] == "srun"
+                    else ["--wrap=sleep infinity"]
+                )
                 self.assertEqual(arguments[-len(suffix):], suffix)
                 self.assertEqual(
                     arguments[1:-len(suffix)],
@@ -143,7 +147,7 @@ class RunProbesTests(unittest.TestCase):
                 for call in srun_mock.call_args_list
                 if any(item.startswith("--gres=") for item in call.args[0])
             },
-            {(f"--gres=gpu:l40s:{count}", "--time=3:00:00") for count in range(1, 5)},
+            {(f"--gres=gpu:l40s:{count}", "--time=0-03:00:00") for count in range(1, 5)},
         )
         cpu_srun_directives = [
             call.args[0]
@@ -151,7 +155,7 @@ class RunProbesTests(unittest.TestCase):
             if not any(item.startswith("--gres=") for item in call.args[0])
         ]
         self.assertEqual(len(cpu_srun_directives), 1)
-        self.assertIn("--time=3:00:00", cpu_srun_directives[0])
+        self.assertIn("--time=0-03:00:00", cpu_srun_directives[0])
         self.assertEqual(
             [
                 (result["label"], result["time"], result["command"])
@@ -159,7 +163,7 @@ class RunProbesTests(unittest.TestCase):
                 if result["label"] == "CPU only (no GPU)"
                 and result["command"] == "srun"
             ],
-            [("CPU only (no GPU)", "3:00:00", "srun")],
+            [("CPU only (no GPU)", "0-03:00:00", "srun")],
         )
 
 
@@ -188,12 +192,7 @@ class MainTests(unittest.TestCase):
             cpus_per_task=12,
             mem="96G",
         )
-        print_mock.assert_called_once_with(
-            [],
-            cpus_per_task=12,
-            mem="96G",
-            sort_by_start=True,
-        )
+        print_mock.assert_called_once_with([], sort_by_start=True)
 
 
 class PartitionTableTests(unittest.TestCase):
@@ -540,25 +539,61 @@ class ProbeReportTests(unittest.TestCase):
         output = StringIO()
 
         with redirect_stdout(output):
-            killarney.print_probe_results(
-                results,
-                cpus_per_task=12,
-                mem="96G",
-                sort_by_start=True,
-            )
+            killarney.print_probe_results(results, sort_by_start=True)
 
         text = output.getvalue()
-        self.assertIn("12 CPUs, 96G", text)
         self.assertLess(text.index("early request"), text.index("late request"))
         self.assertLess(text.index("late request"), text.index("unrunnable request"))
         self.assertLess(text.index("early.sh"), text.index("late.sh"))
         self.assertLess(text.index("late.sh"), text.index("blocked.sh"))
 
+    BLOCKED = {
+        "label": "3x h100",
+        "run_command": "srun --gres=gpu:h100:3 --pty bash",
+        "time": "3:00:00",
+        "command": "srun",
+        "start_time": None,
+        "partition": None,
+        "result": "srun: error: raw reason",
+    }
+    RUNNABLE = {
+        "label": "1x h100",
+        "run_command": "sbatch --gres=gpu:h100:1",
+        "time": "3:00:00",
+        "command": "sbatch",
+        "start_time": "2026-08-01T12:00:00",
+        "partition": "gpubase_bygpu_b1",
+        "result": "Runnable",
+    }
+
+    def test_lists_only_blocked_requests_with_command_time_and_cleaned_reason(self):
+        output = StringIO()
+
+        with redirect_stdout(output):
+            killarney.print_probe_results(
+                [self.BLOCKED, self.RUNNABLE],
+                clean=lambda text: f"cleaned<{text}>",
+            )
+        blocked = output.getvalue().partition("Blocked requests:\n")[2]
+
+        self.assertEqual(
+            blocked.strip().splitlines(),
+            ["srun 3x h100 for 3:00:00: cleaned<srun: error: raw reason>"],
+        )
+
+    def test_omits_the_blocked_section_when_everything_runs(self):
+        output = StringIO()
+
+        with redirect_stdout(output):
+            killarney.print_probe_results([self.RUNNABLE])
+
+        self.assertNotIn("Blocked requests:", output.getvalue())
+
     def test_prints_all_results_in_one_table_with_a_time_column(self):
         results = [
             {
                 "label": "8x h100",
-                "run_command": "sbatch --gres=gpu:h100:8 --cpus-per-task=4 --mem=32G --time=7-00:00:00 job.sh",
+                "run_command": 'sbatch --gres=gpu:h100:8 --cpus-per-task=4 --mem=32G --time=7-00:00:00 --wrap="sleep infinity"',
                 "time": "7-00:00:00",
                 "command": "sbatch",
                 "start_time": "2026-08-01T12:00:00",
@@ -569,22 +604,58 @@ class ProbeReportTests(unittest.TestCase):
         output = StringIO()
 
         with redirect_stdout(output):
-            killarney.print_probe_results(
-                results,
-                cpus_per_task=4,
-                mem="32G",
-            )
+            killarney.print_probe_results(results)
 
         text = output.getvalue()
+        self.assertTrue(text.startswith("Job feasibility:\n"))
+        self.assertNotIn("--test-only,", text)
         self.assertRegex(text, r"Request\s+\| Time\s+\| Command\s+\| Can run")
-        self.assertIn("sbatch", text)
+        self.assertRegex(text, r"\| sbatch --test-only \| yes")
+        self.assertNotIn("Account", text)
         self.assertIn("8x h100", text)
         self.assertIn("7-00:00:00", text)
         self.assertIn("gpubase_h100_b5", text)
         self.assertIn("Run command", text)
         self.assertIn(results[0]["run_command"], text)
-        self.assertIn("replace job.sh", text)
+        self.assertIn("holds the allocation with 'sleep infinity'", text)
+        self.assertIn("srun --jobid=<jobid> --overlap --pty bash", text)
+        self.assertIn("scancel <jobid>", text)
+        self.assertNotIn("job.sh", text)
 
+    def test_uses_the_given_title_and_can_leave_the_notes_to_the_caller(self):
+        output = StringIO()
+
+        with redirect_stdout(output):
+            killarney.print_probe_results(
+                [self.BLOCKED],
+                title="Job feasibility (account=rcl, QOS=normal)",
+                notes=False,
+            )
+        text = output.getvalue()
+
+        self.assertTrue(
+            text.startswith("Job feasibility (account=rcl, QOS=normal):\nRunnable: 0/1\n")
+        )
+        self.assertNotIn("Run command: sbatch holds", text)
+        self.assertIn("  srun 3x h100 for 3:00:00: raw reason\n", text)
+
+    def test_prints_the_run_command_notes_on_their_own(self):
+        output = StringIO()
+
+        with redirect_stdout(output):
+            killarney.print_run_command_notes()
+
+        self.assertEqual(
+            output.getvalue().splitlines(),
+            [
+                "Run command: sbatch holds the allocation with 'sleep infinity' until "
+                "the time limit; srun opens a Bash shell.",
+                "Open a shell in an sbatch allocation with "
+                "'srun --jobid=<jobid> --overlap --pty bash'; release it with "
+                "'scancel <jobid>'.",
+                "",
+            ],
+        )
 
 if __name__ == "__main__":
     unittest.main()

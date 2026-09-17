@@ -749,15 +749,16 @@ class RunSbatchTestTests(unittest.TestCase):
         )
 
     @patch.object(common.subprocess, "run")
-    def test_builds_a_script_from_the_given_directives(self, run_mock):
+    def test_wraps_sleep_infinity_instead_of_piping_a_batch_script(self, run_mock):
         run_mock.return_value = Mock(stdout="", stderr="", returncode=0)
 
         common.run_sbatch_test(["--test-only", "--mem=32G"])
 
         self.assertEqual(
-            run_mock.call_args.kwargs["input"],
-            "#!/bin/bash\n#SBATCH --test-only\n#SBATCH --mem=32G\n",
+            run_mock.call_args.args[0],
+            ["sbatch", "--test-only", "--mem=32G", "--wrap=sleep infinity"],
         )
+        self.assertNotIn("input", run_mock.call_args.kwargs)
 
     def test_reports_missing_sbatch(self):
         with patch.object(common.subprocess, "run", side_effect=FileNotFoundError):
@@ -809,10 +810,31 @@ class FormatRunCommandTests(unittest.TestCase):
 
         self.assertEqual(
             shlex.split(command),
-            ["sbatch", "--comment=two words; echo $HOME", "--time=3:00:00", "job.sh"],
+            [
+                "sbatch",
+                "--comment=two words; echo $HOME",
+                "--time=3:00:00",
+                "--wrap=sleep infinity",
+            ],
         )
         self.assertIn("'--comment=two words; echo $HOME'", command)
         self.assertEqual(directives, original)
+
+    def test_wraps_sleep_infinity_for_sbatch_instead_of_a_script(self):
+        command = common.format_run_command(
+            "sbatch", ["--test-only", "--gres=gpu:h100:2", "--time=3:00:00"]
+        )
+
+        self.assertEqual(
+            command,
+            'sbatch --gres=gpu:h100:2 --time=3:00:00 --wrap="sleep infinity"',
+        )
+        self.assertNotIn("job.sh", command)
+
+    def test_opens_an_interactive_shell_for_srun(self):
+        command = common.format_run_command("srun", ["--test-only", "--time=3:00:00"])
+
+        self.assertEqual(command, "srun --time=3:00:00 --pty bash")
 
 
 if __name__ == "__main__":

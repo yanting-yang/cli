@@ -3,15 +3,15 @@
 from . import common
 
 PROBE_TIMES = (
-    "3:00:00",
-    "12:00:00",
+    "0-03:00:00",
+    "0-12:00:00",
     "1-00:00:00",
     "3-00:00:00",
     "7-00:00:00",
 )
 INTERACTIVE_GPU = "l40s"
 INTERACTIVE_GPU_COUNTS = range(1, 5)
-INTERACTIVE_TIME = "3:00:00"
+INTERACTIVE_TIME = "0-03:00:00"
 
 
 def build_directives(
@@ -170,13 +170,18 @@ def print_account_limits(user, cluster="killarney"):
 def print_probe_results(
     results,
     *,
-    cpus_per_task,
-    mem,
+    title="Job feasibility",
     sort_by_start=False,
     clean=clean_result,
+    notes=True,
 ):
+    """Print one probe table, its run-command notes and any blocked reasons.
+
+    Pass `notes=False` when printing several tables, then call
+    `print_run_command_notes` once.
+    """
     runnable = sum(result["start_time"] is not None for result in results)
-    print(f"Job feasibility (--test-only, {cpus_per_task} CPUs, " f"{mem}):")
+    print(f"{title}:")
     print(f"Runnable: {runnable}/{len(results)}")
 
     displayed_results = results
@@ -193,7 +198,7 @@ def print_probe_results(
         (
             result["label"],
             result["time"],
-            result["command"],
+            f"{result['command']} --test-only",
             "yes" if result["start_time"] else "no",
             result["start_time"] or "-",
             result["partition"] or "-",
@@ -210,8 +215,8 @@ def print_probe_results(
     )
     print()
 
-    print("Run command: replace job.sh with your batch script; srun opens a Bash shell.")
-    print()
+    if notes:
+        print_run_command_notes()
 
     blocked = [result for result in results if result["start_time"] is None]
     if blocked:
@@ -222,6 +227,18 @@ def print_probe_results(
                 f"{clean(result['result'])}"
             )
         print()
+
+
+def print_run_command_notes():
+    print(
+        "Run command: sbatch holds the allocation with 'sleep infinity' until the "
+        "time limit; srun opens a Bash shell."
+    )
+    print(
+        "Open a shell in an sbatch allocation with "
+        "'srun --jobid=<jobid> --overlap --pty bash'; release it with 'scancel <jobid>'."
+    )
+    print()
 
 
 def main(args):
@@ -253,9 +270,4 @@ def main(args):
         cpus_per_task=args.cpus_per_task,
         mem=args.mem,
     )
-    print_probe_results(
-        results,
-        cpus_per_task=args.cpus_per_task,
-        mem=args.mem,
-        sort_by_start=args.sort_by_start,
-    )
+    print_probe_results(results, sort_by_start=args.sort_by_start)

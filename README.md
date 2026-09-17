@@ -94,14 +94,21 @@ request is checked at 3 hours, 12 hours, 1 day, 3 days, and 7 days. It leaves
 `--partition` unset so Killarney can route each request to the appropriate
 hardware and duration partition. It also tests interactive `srun` feasibility
 for 1-4 L40Ss and one CPU-only request at 3 hours. Both commands use
-`--test-only`, so no job starts. All results share one table whose `Command`,
-`Time`, selected partition, and estimated start columns make the routing visible.
+`--test-only`, so no job starts. All results share one table whose `Command`
+(`sbatch --test-only` or `srun --test-only`), `Time`, selected partition, and
+estimated start columns make the routing visible. The CPUs, memory and GPUs of each
+request appear in its `Run command`.
 
 The `Run command` column provides the same resource and time request as a
-copyable command: `sbatch ... job.sh` for batch jobs (replace `job.sh` with your
-script), or `srun ... --pty bash` for an interactive shell. These displayed
-commands omit `--test-only` and submit or run the request when you execute them.
-They leave partition selection to Killarney's routing rules.
+copyable command: `sbatch ... --wrap="sleep infinity"` for a batch allocation, or
+`srun ... --pty bash` for an interactive shell. The `sbatch` form needs no batch
+script: `sleep infinity` holds the allocation until its time limit, so open a shell
+in it with `srun --jobid=<jobid> --overlap --pty bash` and release it with
+`scancel <jobid>` when you are done. The `sbatch` probes use the same `--wrap`, so
+each displayed `sbatch` command is exactly the probed request without `--test-only`;
+the `srun` commands add `--pty bash` to open the shell. Running a displayed command
+submits or runs the request. They leave partition selection to Killarney's routing
+rules.
 
 The probes request 4 CPUs and 32 GB of memory by default. Override those resources
 and sort the table from earliest to latest estimated start with:
@@ -142,21 +149,29 @@ CPUs per job        | 8        | -
 Memory per job (GB) | 64       | -
 GPUs per job        | 1        | -
 
-Job feasibility (sbatch --test-only, 4 CPUs, 32G, 1:00:00):
-Runnable: 3/4
-Request                | Can run | Estimated start     | Partition
-------------------------------------------------------------------
-1x nvidia_b200         | no      | -                   | -
-1x nvidia_b200_2g.45gb | yes     | 2026-07-26T14:30:52 | mig
-1x nvidia_b200_3g.90gb | yes     | 2026-07-26T14:30:52 | mig
-CPU only (no GPU)      | yes     | 2026-07-26T14:30:52 | cpu
+Job feasibility (account=guests, QOS=limited):
+Runnable: 6/8
+Request                | Time       | Command            | Can run | Estimated start     | Partition | Run command
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+1x nvidia_b200         | 0-01:00:00 | sbatch --test-only | no      | -                   | -         | sbatch --account=guests --qos=limited --gres=gpu:nvidia_b200:1 --cpus-per-task=4 --mem=32G --time=0-01:00:00 --wrap="sleep infinity"
+1x nvidia_b200_2g.45gb | 0-01:00:00 | sbatch --test-only | yes     | 2026-07-26T14:30:52 | mig       | sbatch --account=guests --qos=limited --gres=gpu:nvidia_b200_2g.45gb:1 --cpus-per-task=4 --mem=32G --time=0-01:00:00 --wrap="sleep infinity"
+1x nvidia_b200_3g.90gb | 0-01:00:00 | sbatch --test-only | yes     | 2026-07-26T14:30:52 | mig       | sbatch --account=guests --qos=limited --gres=gpu:nvidia_b200_3g.90gb:1 --cpus-per-task=4 --mem=32G --time=0-01:00:00 --wrap="sleep infinity"
+CPU only (no GPU)      | 0-01:00:00 | sbatch --test-only | yes     | 2026-07-26T14:30:52 | cpu       | sbatch --account=guests --qos=limited --cpus-per-task=4 --mem=32G --time=0-01:00:00 --wrap="sleep infinity"
+1x nvidia_b200         | 0-01:00:00 | srun --test-only   | no      | -                   | -         | srun --account=guests --qos=limited --gres=gpu:nvidia_b200:1 --cpus-per-task=4 --mem=32G --time=0-01:00:00 --pty bash
+1x nvidia_b200_2g.45gb | 0-01:00:00 | srun --test-only   | yes     | 2026-07-26T14:30:52 | mig       | srun --account=guests --qos=limited --gres=gpu:nvidia_b200_2g.45gb:1 --cpus-per-task=4 --mem=32G --time=0-01:00:00 --pty bash
+1x nvidia_b200_3g.90gb | 0-01:00:00 | srun --test-only   | yes     | 2026-07-26T14:30:52 | mig       | srun --account=guests --qos=limited --gres=gpu:nvidia_b200_3g.90gb:1 --cpus-per-task=4 --mem=32G --time=0-01:00:00 --pty bash
+CPU only (no GPU)      | 0-01:00:00 | srun --test-only   | yes     | 2026-07-26T14:30:52 | cpu       | srun --account=guests --qos=limited --cpus-per-task=4 --mem=32G --time=0-01:00:00 --pty bash
 
 Blocked requests:
-  1x nvidia_b200: Limited account 'you': GPUs — only a MIG slice is allowed ...
+  sbatch 1x nvidia_b200 for 0-01:00:00: Limited account 'you': GPUs — only a MIG slice is allowed ...
+  srun 1x nvidia_b200 for 0-01:00:00: Limited account 'you': GPUs — only a MIG slice is allowed ...
+
+Run command: sbatch holds the allocation with 'sleep infinity' until the time limit; srun opens a Bash shell.
+Open a shell in an sbatch allocation with 'srun --jobid=<jobid> --overlap --pty bash'; release it with 'scancel <jobid>'.
 ```
 
 The **Account limits** section reports QOS caps from `scontrol show assoc_mgr`, with
-a separate table for each QOS matching your default account. They matter because
+a separate table for each QOS matching each of your accounts. They matter because
 the resource tables above show the whole node — including capacity your account is
 not allowed to request. `Jobs running` is the QOS `MaxJobsPU` and `Jobs submitted`
 is `MaxSubmitJobsPU`, so in the example
@@ -180,8 +195,8 @@ caps while still having these per-user caps:
 The combined GPU limit and each GPU-type limit apply together. These values are
 read from Slurm on each run, so the report follows changes to the account or QOS.
 
-`node_state` looks up your default association's account, then prints every QOS
-listing that account under `Account Limits`. These matches come from the controller's
+`node_state` looks up every account you have an association with, then prints every
+QOS listing that account under `Account Limits`. These matches come from the controller's
 cache; they do not identify your default QOS or establish which QOSs you may use.
 Because a QOS applies the same per-user limits to everyone, limits can be read from
 another user's entry when you have no jobs tracked yet. The report never uses
@@ -204,12 +219,41 @@ Two more `rcl` details are worth knowing when reading these numbers:
   per-model counts that sum to it; only the per-model counts are shown, so the GPUs
   are not double counted.
 
-The feasibility probe submits one request per configured GPU type plus a CPU-only
-request. It deliberately passes no `--partition`, because `rcl` routes jobs to `mig`,
+Each **Account limits** table is followed by its own **Job feasibility** table for
+the same account and QOS. Its probes pass `--account` and `--qos` explicitly, so the
+table shows exactly what that pair allows. For each pair
+they run `sbatch --test-only` and `srun --test-only` for every count of each
+configured GPU type, from one GPU up to the largest single job that QOS allows, plus
+a CPU-only request, each for one hour. The tightest per-user (`MaxTRESPU`) or per-job
+(`MaxTRESPJ`) cap in that QOS, on the GPU type or on all GPUs combined, bounds the
+count, which never exceeds the node's capacity. With the `normal` per-user caps
+above, that means one `nvidia_b200`, one to three `nvidia_b200_2g.45gb`, and one
+`nvidia_b200_3g.90gb`. The guest example above is capped at one GPU per job. A QOS
+with no GPU caps, such as `opportunistic`, is probed up to the node's capacity, and
+a GPU type whose cap is zero is still probed once so its rejection is shown.
+
+The per-pair probes matter because the submit filter treats QOSs differently. On
+`rcl`, `normal` allows one MIG slice per job and no full B200, while `opportunistic`
+allows two MIG slices and up to four full B200s. The cache can also list a QOS your
+account may not use, such as `large`. Each pair's CPU-only `sbatch` probe runs first,
+and if Slurm rejects the account or QOS as invalid, that single row (with the reason
+under `Blocked requests`) stands in for the whole pair. If no account and QOS pair can
+be read, one unscoped **Job feasibility** table probes your default account and QOS up
+to the node's capacity. The `Run command` notes are printed once, after the last
+table.
+
+The probes deliberately pass no `--partition`, because `rcl` routes jobs to `mig`,
 `full`, or `cpu` based on the GPU request; the `Partition` column shows where each
 request actually landed. Anything rejected is listed under `Blocked requests` with
 the scheduler's own explanation — which is how per-account limits (for example
-MIG-slice-only GPU access, or per-job CPU and memory caps) surface.
+MIG-slice-only GPU access, one MIG slice per job, or per-job CPU and memory caps)
+surface. The `Run command` column works as described for Killarney: `sbatch` holds
+the allocation with `--wrap="sleep infinity"`, and `srun` opens a Bash shell. The
+probe size and table order take the same options as Killarney:
+
+```bash
+uv run node_state rcl --cpus-per-task 8 --mem 64G --sort-by-start
+```
 
 Test-only requests are not submitted as jobs.
 

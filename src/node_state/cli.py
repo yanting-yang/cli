@@ -10,7 +10,7 @@ CLUSTER_RUNNERS = {
 }
 
 # Clusters whose reporters run the resizable feasibility probes.
-PROBE_CLUSTERS = ("killarney", "tamia")
+PROBE_CLUSTERS = ("killarney", "rcl", "tamia")
 
 
 def main(argv=None):

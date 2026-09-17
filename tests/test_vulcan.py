@@ -34,7 +34,7 @@ class SbatchTestTests(unittest.TestCase):
         self.assertIn("--gres=gpu:l40s:1", directives)
         self.assertIn("--cpus-per-task=16", directives)
         self.assertIn("--mem=128G", directives)
-        self.assertIn("--time=3:00:00", directives)
+        self.assertIn("--time=0-03:00:00", directives)
         self.assertIn("--nodelist=rack15-12", directives)
 
     @patch.object(common.subprocess, "run")

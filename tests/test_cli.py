@@ -4,7 +4,7 @@ from io import StringIO
 from unittest.mock import Mock, patch
 
 from node_state import cli
-from node_state.clusters import killarney, tamia
+from node_state.clusters import killarney, rcl, tamia
 
 
 class CliTests(unittest.TestCase):
@@ -21,6 +21,23 @@ class CliTests(unittest.TestCase):
 
     def test_registers_tamia(self):
         self.assertIs(cli.CLUSTER_RUNNERS["tamia"], tamia.main)
+
+    def test_registers_rcl(self):
+        self.assertIs(cli.CLUSTER_RUNNERS["rcl"], rcl.main)
+
+    def test_forwards_rcl_probe_options_with_defaults(self):
+        runner = Mock()
+        with patch.dict(cli.CLUSTER_RUNNERS, {"rcl": runner}):
+            cli.main(["rcl", "--cpus-per-task", "8", "--mem", "64G", "--sort-by-start"])
+            cli.main(["rcl"])
+
+        custom, default = (probe_call.args[0] for probe_call in runner.call_args_list)
+        self.assertEqual(custom.cpus_per_task, 8)
+        self.assertEqual(custom.mem, "64G")
+        self.assertTrue(custom.sort_by_start)
+        self.assertEqual(default.cpus_per_task, 4)
+        self.assertEqual(default.mem, "32G")
+        self.assertFalse(default.sort_by_start)
 
     def test_forwards_tamia_probe_options(self):
         runner = Mock()

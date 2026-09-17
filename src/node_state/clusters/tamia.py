@@ -15,9 +15,9 @@ CLUSTER = "tamia"
 CPU_KEY = "cpu_efctv"
 
 # The b1/b2/b3 partition tiers; the submit filter rejects anything over a day.
-PROBE_TIMES = ("3:00:00", "12:00:00", "1-00:00:00")
+PROBE_TIMES = ("0-03:00:00", "0-12:00:00", "1-00:00:00")
 # The *_interac partitions allow up to 6 hours.
-INTERACTIVE_TIME = "3:00:00"
+INTERACTIVE_TIME = "0-03:00:00"
 # The submit filter only routes srun to *_interac when a program is named;
 # without one the request fails with "No partition specified".
 SRUN_COMMAND = ("bash",)
@@ -111,9 +111,5 @@ def main(args):
         mem=args.mem,
     )
     killarney.print_probe_results(
-        results,
-        cpus_per_task=args.cpus_per_task,
-        mem=args.mem,
-        sort_by_start=args.sort_by_start,
-        clean=clean_result,
+        results, sort_by_start=args.sort_by_start, clean=clean_result
     )

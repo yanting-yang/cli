@@ -76,8 +76,6 @@ class MainTests(unittest.TestCase):
         self.probe_mock.assert_called_once_with({"h100": 4}, cpus_per_task=12, mem="96G")
         self.print_probe_mock.assert_called_once_with(
             [],
-            cpus_per_task=12,
-            mem="96G",
             sort_by_start=True,
             clean=tamia.clean_result,
         )
@@ -104,7 +102,7 @@ class RunProbesTests(unittest.TestCase):
                 for label in (
                     "4x h100 (whole node)", "8x h200 (whole node)", "CPU only (no GPU)"
                 )
-                for time_limit in ("3:00:00", "12:00:00", "1-00:00:00")
+                for time_limit in ("0-03:00:00", "0-12:00:00", "1-00:00:00")
             },
         )
         gres = {
@@ -121,7 +119,7 @@ class RunProbesTests(unittest.TestCase):
             with self.subTest(directives=probe_call.args[0]):
                 self.assertEqual(probe_call.kwargs["command"], ("bash",))
                 self.assertIn("--test-only", probe_call.args[0])
-                self.assertIn("--time=3:00:00", probe_call.args[0])
+                self.assertIn("--time=0-03:00:00", probe_call.args[0])
 
     def test_builds_copyable_run_commands_without_test_only(self):
         for result in self.results:
@@ -132,7 +130,13 @@ class RunProbesTests(unittest.TestCase):
         self.assertEqual(
             [result["run_command"] for result in self.results
              if result["command"] == "srun"][0],
-            "srun --gres=gpu:h100:4 --cpus-per-task=4 --mem=32G --time=3:00:00 --pty bash",
+            "srun --gres=gpu:h100:4 --cpus-per-task=4 --mem=32G --time=0-03:00:00 --pty bash",
+        )
+        self.assertEqual(
+            [result["run_command"] for result in self.results
+             if result["command"] == "sbatch"][0],
+            "sbatch --gres=gpu:h100:4 --cpus-per-task=4 --mem=32G --time=0-03:00:00 "
+            '--wrap="sleep infinity"',
         )
 
 

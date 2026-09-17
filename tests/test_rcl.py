@@ -1,35 +1,271 @@
+import shlex
 import unittest
+from argparse import Namespace
 from contextlib import redirect_stdout
 from io import StringIO
-from unittest.mock import call, patch
+from unittest.mock import Mock, call, patch
 
-from node_state.clusters import common, rcl
+from node_state.clusters import common, killarney, rcl
+
+SCONTROL_NODE = """NodeName=rcl-nv2.ece.ubc.ca Arch=x86_64 CoresPerSocket=56
+   CPUAlloc=156 CPUEfctv=224 CPUTot=224 CPULoad=21.17
+   RealMemory=2060000 AllocMem=1214464 FreeMem=38056 Sockets=2 Boards=1
+   State=MIXED+PLANNED ThreadsPerCore=2 TmpDisk=0 Weight=1
+   CfgTRES=cpu=224,mem=2060000M,billing=448,gres/gpu=16,gres/gpu:nvidia_b200=4,gres/gpu:nvidia_b200_2g.45gb=8,gres/gpu:nvidia_b200_3g.90gb=4
+   AllocTRES=cpu=156,mem=1186G,gres/gpu=13,gres/gpu:nvidia_b200=1,gres/gpu:nvidia_b200_2g.45gb=8,gres/gpu:nvidia_b200_3g.90gb=4
+"""
+
+CAPACITIES = {
+    "nvidia_b200": 4,
+    "nvidia_b200_2g.45gb": 8,
+    "nvidia_b200_3g.90gb": 4,
+}
+
+RUNNABLE = {
+    "start_time": "2026-09-24T10:57:15",
+    "partition": "mig",
+    "result": "Runnable",
+}
 
 
-class BuildDirectivesTests(unittest.TestCase):
-    def test_requests_a_single_gpu_of_the_given_type(self):
-        directives = rcl.build_directives("nvidia_b200_3g.90gb")
+class MaxGpuCountsTests(unittest.TestCase):
+    def counts(self, assoc_mgr, qos_name):
+        record = common.parse_qos_records(assoc_mgr)[qos_name]
+        return rcl.max_gpu_counts(CAPACITIES, record, "me")
 
-        self.assertIn("--test-only", directives)
-        self.assertIn("--gres=gpu:nvidia_b200_3g.90gb:1", directives)
-        self.assertIn(f"--cpus-per-task={rcl.PROBE_CPUS}", directives)
-        self.assertIn(f"--mem={rcl.PROBE_MEM}", directives)
-        self.assertIn(f"--time={rcl.PROBE_TIME}", directives)
-
-    def test_omits_the_gres_request_for_cpu_only_probes(self):
-        self.assertFalse(
-            any(directive.startswith("--gres") for directive in rcl.build_directives())
+    def test_caps_each_model_at_its_per_user_limit(self):
+        self.assertEqual(
+            self.counts(AccountLimitsTests.NORMAL_ASSOC_MGR, "normal"),
+            {"nvidia_b200": 1, "nvidia_b200_2g.45gb": 3, "nvidia_b200_3g.90gb": 1},
         )
 
-    def test_never_pins_a_partition_because_the_cluster_routes_jobs(self):
-        for gpu in (None, "nvidia_b200"):
-            with self.subTest(gpu=gpu):
+    def test_caps_every_model_at_the_combined_per_user_gpu_limit(self):
+        assoc_mgr = AccountLimitsTests.NORMAL_ASSOC_MGR.replace(
+            "MaxTRESPU=cpu=64(8),mem=524288(65536),gres/gpu=4(1),"
+            "gres/gpu:nvidia_b200=1(0),gres/gpu:nvidia_b200_2g.45gb=3(0),"
+            "gres/gpu:nvidia_b200_3g.90gb=1(1)",
+            "MaxTRESPU=cpu=64(8),gres/gpu=2(1)",
+        )
+
+        self.assertEqual(
+            self.counts(assoc_mgr, "normal"),
+            {"nvidia_b200": 2, "nvidia_b200_2g.45gb": 2, "nvidia_b200_3g.90gb": 2},
+        )
+
+    def test_applies_per_job_gpu_caps(self):
+        self.assertEqual(
+            self.counts(AccountLimitsTests.ASSOC_MGR, "limited"),
+            {"nvidia_b200": 1, "nvidia_b200_2g.45gb": 1, "nvidia_b200_3g.90gb": 1},
+        )
+
+    def test_borrows_caps_when_the_caller_has_no_user_entry(self):
+        assoc_mgr = AccountLimitsTests.NORMAL_ASSOC_MGR.replace(
+            "      me(24918)", "      another(24919)"
+        )
+
+        self.assertEqual(
+            self.counts(assoc_mgr, "normal"),
+            {"nvidia_b200": 1, "nvidia_b200_2g.45gb": 3, "nvidia_b200_3g.90gb": 1},
+        )
+
+    def test_uses_node_capacity_when_the_qos_caps_no_gpus(self):
+        self.assertEqual(
+            self.counts(AccountLimitsTests.MULTI_QOS_ASSOC_MGR, "limited"), CAPACITIES
+        )
+
+    def test_ignores_unlimited_per_user_caps(self):
+        # opportunistic's per-user gres/gpu is N; only its per-job cap of 2 applies.
+        self.assertEqual(
+            self.counts(AccountLimitsTests.MULTI_QOS_ASSOC_MGR, "opportunistic"),
+            {"nvidia_b200": 2, "nvidia_b200_2g.45gb": 2, "nvidia_b200_3g.90gb": 2},
+        )
+
+    def test_applies_per_model_per_job_caps(self):
+        assoc_mgr = AccountLimitsTests.NORMAL_ASSOC_MGR.replace(
+            "    MaxTRESPJ=\n", "    MaxTRESPJ=gres/gpu:nvidia_b200_2g.45gb=2\n"
+        )
+
+        self.assertEqual(
+            self.counts(assoc_mgr, "normal"),
+            {"nvidia_b200": 1, "nvidia_b200_2g.45gb": 2, "nvidia_b200_3g.90gb": 1},
+        )
+
+    def test_never_exceeds_one_nodes_capacity(self):
+        assoc_mgr = AccountLimitsTests.NORMAL_ASSOC_MGR.replace(
+            "gres/gpu=4(1),gres/gpu:nvidia_b200=1(0)",
+            "gres/gpu=N(1),gres/gpu:nvidia_b200=16(0)",
+        )
+
+        self.assertEqual(self.counts(assoc_mgr, "normal")["nvidia_b200"], 4)
+
+    def test_still_probes_one_gpu_when_the_cap_is_zero(self):
+        assoc_mgr = AccountLimitsTests.NORMAL_ASSOC_MGR.replace(
+            "gres/gpu:nvidia_b200=1(0)", "gres/gpu:nvidia_b200=0(0)"
+        )
+
+        self.assertEqual(self.counts(assoc_mgr, "normal")["nvidia_b200"], 1)
+
+
+class RunProbesTests(unittest.TestCase):
+    def setUp(self):
+        self.sbatch_mock = self.enterContext(
+            patch.object(common, "run_sbatch_test", return_value=RUNNABLE)
+        )
+        self.srun_mock = self.enterContext(
+            patch.object(common, "run_srun_test", return_value=RUNNABLE)
+        )
+        self.results = rcl.run_probes(
+            {"nvidia_b200_2g.45gb": 3, "nvidia_b200": 1},
+            account="rcl",
+            qos="normal",
+            cpus_per_task=8,
+            mem="64G",
+        )
+        self.calls = self.sbatch_mock.call_args_list + self.srun_mock.call_args_list
+
+    def test_probes_every_gpu_count_up_to_the_limit_with_sbatch_and_srun(self):
+        labels = [
+            "1x nvidia_b200",
+            "1x nvidia_b200_2g.45gb",
+            "2x nvidia_b200_2g.45gb",
+            "3x nvidia_b200_2g.45gb",
+            "CPU only (no GPU)",
+        ]
+
+        self.assertEqual(
+            [(result["command"], result["label"]) for result in self.results],
+            [("sbatch", label) for label in labels]
+            + [("srun", label) for label in labels],
+        )
+
+    def test_probes_cpu_only_sbatch_first_and_only_once(self):
+        self.assertEqual(self.sbatch_mock.call_count, 5)
+        self.assertEqual(self.srun_mock.call_count, 5)
+        self.assertEqual(
+            self.sbatch_mock.call_args_list[0].args[0],
+            ["--test-only", "--account=rcl", "--qos=normal", "--cpus-per-task=8",
+             "--mem=64G", f"--time={rcl.PROBE_TIME}"],
+        )
+
+    def test_pins_account_and_qos_on_every_probe(self):
+        for probe_call in self.calls:
+            with self.subTest(directives=probe_call.args[0]):
+                self.assertEqual(
+                    probe_call.args[0][:3],
+                    ["--test-only", "--account=rcl", "--qos=normal"],
+                )
+                self.assertIn("--cpus-per-task=8", probe_call.args[0])
+                self.assertIn("--mem=64G", probe_call.args[0])
+                self.assertIn(f"--time={rcl.PROBE_TIME}", probe_call.args[0])
                 self.assertFalse(
                     any(
-                        directive.startswith(("--partition", "-p"))
-                        for directive in rcl.build_directives(gpu)
+                        item.startswith(("--partition", "-p"))
+                        for item in probe_call.args[0]
                     )
                 )
+        self.assertEqual({result["time"] for result in self.results}, {rcl.PROBE_TIME})
+
+    def test_each_result_comes_from_the_command_it_names(self):
+        self.sbatch_mock.return_value = {**RUNNABLE, "partition": "from-sbatch"}
+        self.srun_mock.return_value = {**RUNNABLE, "partition": "from-srun"}
+
+        results = rcl.run_probes({"nvidia_b200": 1}, cpus_per_task=4, mem="32G")
+
+        self.assertEqual({result["command"] for result in results}, {"sbatch", "srun"})
+        for result in results:
+            with self.subTest(label=result["label"], command=result["command"]):
+                self.assertEqual(result["partition"], f"from-{result['command']}")
+
+    def test_srun_probes_need_no_program(self):
+        for probe_call in self.srun_mock.call_args_list:
+            with self.subTest(directives=probe_call.args[0]):
+                self.assertEqual(probe_call.kwargs, {})
+
+    def test_builds_copyable_run_commands_matching_each_probe(self):
+        sbatch_calls = iter(self.sbatch_mock.call_args_list[1:])
+        srun_calls = iter(self.srun_mock.call_args_list)
+        for result in self.results:
+            with self.subTest(label=result["label"], command=result["command"]):
+                if result["label"] == "CPU only (no GPU)" and result["command"] == "sbatch":
+                    probe_call = self.sbatch_mock.call_args_list[0]
+                elif result["command"] == "sbatch":
+                    probe_call = next(sbatch_calls)
+                else:
+                    probe_call = next(srun_calls)
+                suffix = (
+                    ["--pty", "bash"]
+                    if result["command"] == "srun"
+                    else ["--wrap=sleep infinity"]
+                )
+                self.assertEqual(
+                    shlex.split(result["run_command"]),
+                    [
+                        result["command"],
+                        *(arg for arg in probe_call.args[0] if arg != "--test-only"),
+                        *suffix,
+                    ],
+                )
+        run_commands = [result["run_command"] for result in self.results]
+        self.assertIn(
+            "sbatch --account=rcl --qos=normal --gres=gpu:nvidia_b200_2g.45gb:3 "
+            '--cpus-per-task=8 --mem=64G --time=0-01:00:00 --wrap="sleep infinity"',
+            run_commands,
+        )
+        self.assertIn(
+            "srun --account=rcl --qos=normal --cpus-per-task=8 --mem=64G "
+            "--time=0-01:00:00 --pty bash",
+            run_commands,
+        )
+
+    def test_reports_only_the_scope_check_for_a_pair_slurm_rejects(self):
+        self.sbatch_mock.reset_mock()
+        self.srun_mock.reset_mock()
+        self.sbatch_mock.return_value = {
+            "start_time": None,
+            "partition": None,
+            "result": "allocation failure: Invalid qos specification",
+        }
+
+        results = rcl.run_probes(
+            {"nvidia_b200": 4}, account="rcl", qos="large", cpus_per_task=4, mem="32G"
+        )
+
+        self.assertEqual(
+            [(result["command"], result["label"]) for result in results],
+            [("sbatch", "CPU only (no GPU)")],
+        )
+        self.assertEqual(self.sbatch_mock.call_count, 1)
+        self.srun_mock.assert_not_called()
+
+    def test_does_not_skip_a_pair_for_other_rejections(self):
+        self.sbatch_mock.return_value = {
+            "start_time": None,
+            "partition": None,
+            "result": "Limited account 'me': CPUs - max 8 per job",
+        }
+
+        results = rcl.run_probes(
+            {"nvidia_b200": 1}, account="rcl", qos="normal", cpus_per_task=16, mem="32G"
+        )
+
+        self.assertEqual(len(results), 4)
+
+    def test_runs_unscoped_probes_without_account_or_qos(self):
+        self.sbatch_mock.reset_mock()
+        self.srun_mock.reset_mock()
+        self.sbatch_mock.return_value = {
+            "start_time": None,
+            "partition": None,
+            "result": "Invalid account or account/partition combination specified",
+        }
+
+        results = rcl.run_probes({"nvidia_b200": 1}, cpus_per_task=4, mem="32G")
+
+        self.assertEqual(len(results), 4)
+        for probe_call in self.sbatch_mock.call_args_list + self.srun_mock.call_args_list:
+            self.assertFalse(
+                any(item.startswith(("--account", "--qos")) for item in probe_call.args[0])
+            )
 
 
 class CleanResultTests(unittest.TestCase):
@@ -44,57 +280,190 @@ class CleanResultTests(unittest.TestCase):
             "Limited account 'yanting.yang': GPUs - only a MIG slice is allowed",
         )
 
+    def test_strips_the_srun_prefix(self):
+        raw = (
+            "srun: error: Limited account 'you': GPUs - at most 1 MIG slice per job "
+            "(you requested 2). allocation failure: Unspecified error"
+        )
+
+        self.assertEqual(
+            rcl.clean_result(raw),
+            "Limited account 'you': GPUs - at most 1 MIG slice per job (you requested 2)",
+        )
+
+    # Captured from `sbatch --test-only --qos=large ...` on rcl.
+    BANNER_REJECTION = (
+        "sbatch: error: " + "=" * 71 + "\n"
+        "sbatch: error: STORAGE POLICY: Please ensure large job outputs are "
+        "written to /scratch\n"
+        "sbatch: error: Please delete files from /scratch after you are done "
+        "with your work.   \n"
+        "sbatch: error: " + "=" * 71 + "\n"
+        "allocation failure: Invalid qos specification\n"
+    )
+
+    def banner_rejection(self):
+        return common.parse_scheduling_test_result(
+            Mock(stdout="", stderr=self.BANNER_REJECTION, returncode=1), "sbatch"
+        )
+
+    def test_strips_the_storage_policy_banner(self):
+        self.assertEqual(
+            rcl.clean_result(self.banner_rejection()["result"]),
+            "allocation failure: Invalid qos specification",
+        )
+
     def test_leaves_unprefixed_text_alone(self):
         self.assertEqual(rcl.clean_result("'sbatch' not found"), "'sbatch' not found")
 
+    def test_cleans_the_blocked_reasons_in_the_probe_report(self):
+        result = self.banner_rejection()
+        output = StringIO()
 
-class ProbeReportTests(unittest.TestCase):
+        with redirect_stdout(output):
+            killarney.print_probe_results(
+                [
+                    {
+                        **result,
+                        "label": "1x nvidia_b200_2g.45gb",
+                        "time": rcl.PROBE_TIME,
+                        "command": "sbatch",
+                        "run_command": "sbatch --wrap",
+                    }
+                ],
+                clean=rcl.clean_result,
+            )
+        text = output.getvalue()
+
+        self.assertIn(
+            "  sbatch 1x nvidia_b200_2g.45gb for 0-01:00:00: "
+            "allocation failure: Invalid qos specification\n",
+            text,
+        )
+        self.assertNotIn("STORAGE POLICY", text)
+
+
+class MainTests(unittest.TestCase):
     def setUp(self):
-        self.results = [
-            {
-                "label": "1x nvidia_b200",
-                "start_time": None,
-                "partition": None,
-                "result": "sbatch: error: only a MIG slice is allowed",
-            },
-            {
-                "label": "1x nvidia_b200_3g.90gb",
-                "start_time": "2026-07-26T14:30:52",
-                "partition": "mig",
-                "result": "Runnable",
-            },
+        self.enterContext(
+            patch.object(
+                common, "fetch_nodes", return_value=common.parse_nodes(SCONTROL_NODE)
+            )
+        )
+        self.enterContext(patch.object(common, "current_user", return_value="me"))
+        self.assoc_mock = self.enterContext(
+            patch.object(
+                common,
+                "fetch_assoc_mgr",
+                return_value=AccountLimitsTests.NORMAL_ASSOC_MGR,
+            )
+        )
+        self.enterContext(
+            patch.object(common, "fetch_user_job_counts", return_value=None)
+        )
+        self.probe_mock = self.enterContext(
+            patch.object(rcl, "run_probes", return_value=[])
+        )
+        self.print_probe_mock = self.enterContext(
+            patch.object(killarney, "print_probe_results")
+        )
+
+    def render(self):
+        output = StringIO()
+        with redirect_stdout(output):
+            rcl.main(Namespace(cpus_per_task=12, mem="96G", sort_by_start=True))
+        return output.getvalue()
+
+    def test_reports_nodes_without_double_counting_gpus(self):
+        text = self.render()
+
+        self.assertIn(
+            "224 CPUs / 2011 GB / 4x nvidia_b200 / 8x nvidia_b200_2g.45gb / "
+            "4x nvidia_b200_3g.90gb (1/1):",
+            text,
+        )
+        self.assertNotIn("x gpu", text)
+        self.assertIn("account=rcl, QOS=normal", text)
+
+    def test_probes_each_account_and_qos_up_to_its_gpu_limits(self):
+        self.assoc_mock.return_value = AccountLimitsTests.MULTI_QOS_ASSOC_MGR
+
+        self.render()
+
+        self.assertEqual(
+            self.probe_mock.call_args_list,
+            [
+                call(
+                    {"nvidia_b200": 1, "nvidia_b200_2g.45gb": 3, "nvidia_b200_3g.90gb": 1},
+                    account="rcl",
+                    qos="normal",
+                    cpus_per_task=12,
+                    mem="96G",
+                ),
+                call(
+                    {"nvidia_b200": 2, "nvidia_b200_2g.45gb": 2, "nvidia_b200_3g.90gb": 2},
+                    account="rcl",
+                    qos="opportunistic",
+                    cpus_per_task=12,
+                    mem="96G",
+                ),
+            ],
+        )
+        self.assertEqual(
+            self.print_probe_mock.call_args_list,
+            [
+                call(
+                    [],
+                    title=f"Job feasibility (account=rcl, QOS={qos})",
+                    sort_by_start=True,
+                    clean=rcl.clean_result,
+                    notes=False,
+                )
+                for qos in ("normal", "opportunistic")
+            ],
+        )
+
+    def test_prints_each_feasibility_table_after_its_limits_table(self):
+        self.assoc_mock.return_value = AccountLimitsTests.MULTI_QOS_ASSOC_MGR
+        self.print_probe_mock.side_effect = lambda results, **kwargs: print(
+            f"{kwargs['title']}:"
+        )
+
+        text = self.render()
+
+        headings = [
+            line
+            for line in text.splitlines()
+            if line.startswith(("Account limits (", "Job feasibility", "Run command:"))
         ]
+        self.assertEqual(
+            headings,
+            [
+                "Account limits (account=rcl, QOS=normal):",
+                "Job feasibility (account=rcl, QOS=normal):",
+                "Account limits (account=rcl, QOS=opportunistic):",
+                "Job feasibility (account=rcl, QOS=opportunistic):",
+                "Run command: sbatch holds the allocation with 'sleep infinity' until "
+                "the time limit; srun opens a Bash shell.",
+            ],
+        )
 
-    def test_reports_each_request_and_its_runnability(self):
-        output = StringIO()
+    def test_probes_unscoped_up_to_node_capacity_when_limits_are_unavailable(self):
+        self.assoc_mock.return_value = None
 
-        with redirect_stdout(output):
-            rcl.print_probe_results(self.results)
-        text = output.getvalue()
+        text = self.render()
 
-        self.assertIn("Runnable: 1/2", text)
-        self.assertIn("1x nvidia_b200_3g.90gb", text)
-        self.assertIn("2026-07-26T14:30:52", text)
-        self.assertIn("mig", text)
-
-    def test_explains_why_blocked_requests_failed(self):
-        output = StringIO()
-
-        with redirect_stdout(output):
-            rcl.print_probe_results(self.results)
-        text = output.getvalue()
-
-        self.assertIn("Blocked requests:", text)
-        self.assertIn("only a MIG slice is allowed", text)
-
-    def test_omits_the_blocked_section_when_everything_runs(self):
-        runnable = [result for result in self.results if result["start_time"]]
-        output = StringIO()
-
-        with redirect_stdout(output):
-            rcl.print_probe_results(runnable)
-
-        self.assertNotIn("Blocked requests:", output.getvalue())
+        self.probe_mock.assert_called_once_with(
+            CAPACITIES, account=None, qos=None, cpus_per_task=12, mem="96G"
+        )
+        self.print_probe_mock.assert_called_once_with(
+            [],
+            title="Job feasibility",
+            sort_by_start=True,
+            clean=rcl.clean_result,
+            notes=False,
+        )
+        self.assertEqual(text.count("Run command: sbatch holds"), 1)
 
 
 class AccountLimitsTests(unittest.TestCase):
@@ -257,6 +626,65 @@ QOS=limited(2)
     def test_notes_when_the_limits_cannot_be_read(self):
         with patch.object(common, "fetch_assoc_mgr", return_value=None):
             self.assertIn("unavailable", self.render())
+
+    @patch.object(common, "fetch_assoc_mgr")
+    def test_returns_the_reported_qos_records_for_probe_sizing(self, assoc_mock):
+        assoc_mock.return_value = self.MULTI_QOS_ASSOC_MGR
+        records = common.parse_qos_records(self.MULTI_QOS_ASSOC_MGR)
+
+        with (
+            patch.object(common, "fetch_user_job_counts", return_value=None),
+            redirect_stdout(StringIO()),
+        ):
+            reported = rcl.print_account_limits("me")
+
+        self.assertEqual(
+            reported,
+            {"rcl": {"normal": records["normal"], "opportunistic": records["opportunistic"]}},
+        )
+
+    @patch.object(common, "fetch_user_job_counts")
+    @patch.object(common, "fetch_assoc_mgr")
+    def test_reports_every_account_of_the_user(self, assoc_mock, counts_mock):
+        assoc_mock.return_value = self.MULTI_QOS_ASSOC_MGR.replace(
+            "    ParentAccount= Lineage=/rcl/0-me/ DefAssoc=Yes\n",
+            "    ParentAccount= Lineage=/rcl/0-me/ DefAssoc=Yes\n"
+            "ClusterName=rcl Account=guests UserName=me(24918) Partition= Priority=0 ID=33\n"
+            "    ParentAccount= Lineage=/guests/0-me/ DefAssoc=No\n",
+        )
+        counts_mock.return_value = {"running": 0, "pending": 0, "total": 0}
+        records = common.parse_qos_records(self.MULTI_QOS_ASSOC_MGR)
+        output = StringIO()
+
+        with redirect_stdout(output):
+            reported = rcl.print_account_limits("me")
+
+        self.assertEqual(
+            reported,
+            {
+                "guests": {"limited": records["limited"]},
+                "rcl": {"normal": records["normal"], "opportunistic": records["opportunistic"]},
+            },
+        )
+        text = output.getvalue()
+        self.assertLess(text.index("account=guests, QOS=limited"), text.index("account=rcl, QOS=normal"))
+        self.assertEqual(
+            counts_mock.call_args_list,
+            [call("me", qos="limited"), call("me", qos="normal"), call("me", qos="opportunistic")],
+        )
+
+    def test_returns_no_records_when_nothing_is_reported(self):
+        for assoc_mgr in (
+            None,
+            self.ASSOC_MGR.replace("UserName=me(24918)", "UserName="),
+            self.ASSOC_MGR.replace("      guests", "      other"),
+        ):
+            with (
+                self.subTest(assoc_mgr=assoc_mgr and assoc_mgr[-40:]),
+                patch.object(common, "fetch_assoc_mgr", return_value=assoc_mgr),
+                redirect_stdout(StringIO()),
+            ):
+                self.assertEqual(rcl.print_account_limits("me"), {})
 
     @patch.object(common, "fetch_assoc_mgr")
     def test_notes_when_no_qos_lists_the_account(self, assoc_mock):

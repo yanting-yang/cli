@@ -16,7 +16,7 @@ Current commands:
 - [src/node_state/clusters/fallback.py](src/node_state/clusters/fallback.py) — generic resource summary for unregistered clusters
 - [src/node_state/clusters/killarney.py](src/node_state/clusters/killarney.py) — reporter for `killarney`
 - [src/node_state/clusters/vulcan.py](src/node_state/clusters/vulcan.py) — reporter for `vulcan`
-- [src/node_state/clusters/rcl.py](src/node_state/clusters/rcl.py) — reporter for `rcl`
+- [src/node_state/clusters/rcl.py](src/node_state/clusters/rcl.py) — reporter for `rcl`; reuses `killarney`'s probe-report output, probing `sbatch` and `srun` with explicit `--account`/`--qos` for every account and cached QOS match, printed right after that pair's limits table, each up to that QOS's tightest per-user/per-job GPU cap (`max_gpu_counts`, never above node capacity); a pair Slurm rejects as invalid keeps only its CPU-only `sbatch` row
 - [src/node_state/clusters/tamia.py](src/node_state/clusters/tamia.py) — reporter for `tamia`; reuses `killarney`'s partition, account-limit and probe-report output, but probes only whole GPU nodes (partial GPU requests are rejected), stops at the 1-day walltime cap, and passes a program to `srun` because the submit filter otherwise finds no partition
 - [tests/](tests/) — `unittest` suite; one module per source module
 
@@ -27,6 +27,7 @@ uv sync                      # install/refresh the environment
 uv run node_state            # generic summary (needs scontrol)
 uv run node_state killarney  # Killarney-specific summary and probes
 uv run node_state tamia      # Tamia summary and probes (same options as killarney)
+uv run node_state rcl        # RCL summary, QOS limits and probes (same options as killarney)
 uv run python -m unittest discover -s tests -t tests   # run the tests
 ```
 
@@ -46,7 +47,9 @@ Slurm reports the same facts differently per site, so check these before trustin
 - **Reserved cores.** `common.parse_nodes` records both `cpu_tot` (`CPUTot`) and `cpu_efctv` (`CPUEfctv`, falling back to `CPUTot`). Where `CoreSpecCount` reserves cores, pass `cpu_key="cpu_efctv"` to `node_hw_key`/`group_by_hardware`/`print_summary` or available CPUs will be overstated — `rcl` does this via its `CPU_KEY` constant.
 - **GPU rollups.** `CfgTRES` may list an untyped `gres/gpu=N` alongside per-model entries summing to the same `N`. `parse_tres_gpus` returns both; a cluster that advertises both must call `normalize_gpu_rollups` or every GPU is counted twice (as `killarney` and `rcl` do).
 - **Partition routing.** Do not hardcode `--partition` in feasibility probes without checking; `killarney` and `rcl` route jobs by resource request.
-- **Account/QOS caps.** Node tables show the hardware, not what an account may request. `rcl` reports these via `common.fetch_assoc_mgr` + `parse_default_account` / `parse_qos_records` / `qos_names_for_account` / `qos_user_limits`. `killarney` uses `fetch_user_account_qos` to report every QOS assigned to each of the caller's accounts, falling back to `parse_user_accounts` + cache matches if `sacctmgr` fails. QOS per-account caps and usage are parsed separately from per-user caps and usage.
+- **Probe report.** `killarney.print_probe_results` shows `sbatch --test-only`/`srun --test-only` in its `Command` column and takes a `title`. `rcl` prints one table per account/QOS right after that pair's limits table (via `print_account_limits(after_each=...)`), so it passes `notes=False` and calls `print_run_command_notes` once at the end.
+- **Run commands.** `run_sbatch_test` and `format_run_command` both use `common.SBATCH_WRAP` (`--wrap="sleep infinity"`) instead of a batch script, so a displayed `sbatch` command is the probed request minus `--test-only`. Keep them in step when changing either.
+- **Account/QOS caps.** Node tables show the hardware, not what an account may request. `rcl` reports these for every account via `common.fetch_assoc_mgr` + `parse_user_accounts` / `parse_qos_records` / `qos_names_for_account` / `qos_user_limits`. `killarney` uses `fetch_user_account_qos` to report every QOS assigned to each of the caller's accounts, falling back to `parse_user_accounts` + cache matches if `sacctmgr` fails. QOS per-account caps and usage are parsed separately from per-user caps and usage.
 
 ### Reading account limits
 
@@ -55,7 +58,7 @@ On some sites, `sacctmgr` and `sacct` fail from a login shell when `slurmdbd` li
 
 These quirks of that output shape the parser in [common.py](src/node_state/clusters/common.py):
 
-- Association records carry **no** `QOS=` field, and `users=` does **not** filter the QOS section. The user's default account is therefore matched against each QOS's `Account Limits` block (`qos_names_for_account`), and `rcl` prints every matching QOS. These cache matches do not identify the default QOS or establish which QOSs the user may use.
+- Association records carry **no** `QOS=` field, and `users=` does **not** filter the QOS section. Each of the user's accounts is therefore matched against each QOS's `Account Limits` block (`qos_names_for_account`), and `rcl` prints and probes every matching pair. These cache matches do not identify the default QOS or establish which QOSs the user may use.
 - Killarney also reads `MaxJobsPA` / `MaxSubmitJobsPA` / `MaxTRESPA` under `Account Limits`, and `MaxWallPJ` (minutes) / `MaxTRESPN` at QOS scope. Account usage covers all users within that QOS; it is separate from the caller's per-user usage. A missing account entry can borrow QOS caps from another account, but never its usage.
 - `MaxJobsPU` / `MaxSubmitJobsPU` are only rendered inside per-user entries under `User Limits`, and a user with no tracked jobs has no entry at all. Since a QOS applies one value to every user, `qos_user_limits` falls back to another user's entry for the limits — take only the limit, never the parenthesised usage, which is that other user's. If no entry supplies a limit, show `?`. Live usage for the caller comes from `squeue` via `fetch_user_job_counts`, scoped to the user and each QOS across all accounts.
 

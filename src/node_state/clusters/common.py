@@ -11,6 +11,9 @@ SBATCH_START_PATTERN = re.compile(
 )
 SBATCH_PARTITION_PATTERN = re.compile(r"\bin partition (\S+)")
 SINFO_PARTITION_FORMAT = "Partition,Gres,Nodes,Time"
+# sbatch runs this in place of a batch script, holding the allocation until
+# the time limit or `scancel`.
+SBATCH_WRAP = "sleep infinity"
 
 
 def parse_tres_gpus(tres_str):
@@ -568,23 +571,26 @@ def fetch_user_job_counts(user, qos=None):
 
 
 def format_run_command(command, directives):
-    """Format a runnable batch-script or interactive-shell request for copying."""
+    """Format a runnable batch-allocation or interactive-shell request for copying."""
     arguments = [command, *(arg for arg in directives if arg != "--test-only")]
-    arguments += ["--pty", "bash"] if command == "srun" else ["job.sh"]
-    return shlex.join(arguments)
+    if command == "srun":
+        return shlex.join([*arguments, "--pty", "bash"])
+    # Double quotes are safe because SBATCH_WRAP has no shell metacharacters.
+    return f'{shlex.join(arguments)} --wrap="{SBATCH_WRAP}"'
 
 
 def run_sbatch_test(directives, timeout=30):
     """Submit an `sbatch --test-only` probe and report whether it could run.
 
+    The probe wraps the same placeholder program as `format_run_command`, so
+    no batch script is needed.
+
     Returns a dict with `start_time` (None when the request was rejected),
     `partition` (as resolved by the scheduler) and the raw `result` text.
     """
-    script = "#!/bin/bash\n" + "".join(f"#SBATCH {arg}\n" for arg in directives)
     try:
         completed = subprocess.run(
-            ["sbatch"],
-            input=script,
+            ["sbatch", *directives, f"--wrap={SBATCH_WRAP}"],
             capture_output=True,
             text=True,
             timeout=timeout,

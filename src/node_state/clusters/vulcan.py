@@ -12,7 +12,7 @@ def build_directives(node_name):
         "--gres=gpu:l40s:1",
         "--cpus-per-task=16",
         "--mem=128G",
-        "--time=3:00:00",
+        "--time=0-03:00:00",
         f"--nodelist={node_name}",
     ]
 
@@ -27,7 +27,7 @@ def print_sbatch_test_results(results):
     start_times = [result["start_time"] for result in results if result["start_time"]]
     print(
         f"SBATCH test-only request: account={SBATCH_ACCOUNT}, 1x l40s, "
-        "16 CPUs, 128 GB, 3:00:00"
+        "16 CPUs, 128 GB, 0-03:00:00"
     )
     print(f"Runnable: {runnable}/{len(results)}")
     print(f"Unavailable: {len(results) - runnable}/{len(results)}")
