@@ -171,7 +171,7 @@ Open a shell in an sbatch allocation with 'srun --jobid=<jobid> --overlap --pty 
 ```
 
 The **Account limits** section reports QOS caps from `scontrol show assoc_mgr`, with
-a separate table for each QOS matching each of your accounts. They matter because
+a separate table for each account/QOS pair being checked. They matter because
 the resource tables above show the whole node — including capacity your account is
 not allowed to request. `Jobs running` is the QOS `MaxJobsPU` and `Jobs submitted`
 is `MaxSubmitJobsPU`, so in the example
@@ -195,9 +195,15 @@ caps while still having these per-user caps:
 The combined GPU limit and each GPU-type limit apply together. These values are
 read from Slurm on each run, so the report follows changes to the account or QOS.
 
-`node_state` looks up every account you have an association with, then prints every
-QOS listing that account under `Account Limits`. These matches come from the controller's
-cache; they do not identify your default QOS or establish which QOSs you may use.
+`node_state` reads your account/QOS assignments from `sacctmgr` when available.
+If that query fails, it pairs each of your associated accounts with every QOS in
+the controller cache, and labels these as candidates checked by feasibility
+probes. Cached `Account Limits` entries track usage and cannot establish QOS
+permissions: for example, `large` can be usable by `guests` while only `rcl` has a
+cached account entry. QOSs with no account entries are checked too. An assigned QOS
+missing from the cache is still shown and probed up to node capacity, with its
+limits marked unavailable.
+
 Because a QOS applies the same per-user limits to everyone, limits can be read from
 another user's entry when you have no jobs tracked yet. The report never uses
 another user's allocation as yours. Running and submitted job counts come from
@@ -232,10 +238,10 @@ above, that means one `nvidia_b200`, one to three `nvidia_b200_2g.45gb`, and one
 with no GPU caps, such as `opportunistic`, is probed up to the node's capacity, and
 a GPU type whose cap is zero is still probed once so its rejection is shown.
 
-The per-pair probes matter because the submit filter treats QOSs differently. On
-`rcl`, `normal` allows one MIG slice per job and no full B200, while `opportunistic`
-allows two MIG slices and up to four full B200s. The cache can also list a QOS your
-account may not use, such as `large`. Each pair's CPU-only `sbatch` probe runs first,
+The per-pair probes matter because the submit filter treats accounts and QOSs
+differently. Cached candidates may include QOSs your account cannot use, so their
+presence in the report is not an access grant. Each pair's CPU-only `sbatch` probe
+runs first,
 and if Slurm rejects the account or QOS as invalid, that single row (with the reason
 under `Blocked requests`) stands in for the whole pair. If no account and QOS pair can
 be read, one unscoped **Job feasibility** table probes your default account and QOS up

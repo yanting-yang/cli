@@ -358,6 +358,9 @@ class MainTests(unittest.TestCase):
                 return_value=AccountLimitsTests.NORMAL_ASSOC_MGR,
             )
         )
+        self.assignments_mock = self.enterContext(
+            patch.object(common, "fetch_user_account_qos", return_value=None)
+        )
         self.enterContext(
             patch.object(common, "fetch_user_job_counts", return_value=None)
         )
@@ -394,6 +397,13 @@ class MainTests(unittest.TestCase):
             self.probe_mock.call_args_list,
             [
                 call(
+                    CAPACITIES,
+                    account="rcl",
+                    qos="limited",
+                    cpus_per_task=12,
+                    mem="96G",
+                ),
+                call(
                     {"nvidia_b200": 1, "nvidia_b200_2g.45gb": 3, "nvidia_b200_3g.90gb": 1},
                     account="rcl",
                     qos="normal",
@@ -419,7 +429,7 @@ class MainTests(unittest.TestCase):
                     clean=rcl.clean_result,
                     notes=False,
                 )
-                for qos in ("normal", "opportunistic")
+                for qos in ("limited", "normal", "opportunistic")
             ],
         )
 
@@ -439,6 +449,8 @@ class MainTests(unittest.TestCase):
         self.assertEqual(
             headings,
             [
+                "Account limits (account=rcl, QOS=limited):",
+                "Job feasibility (account=rcl, QOS=limited):",
                 "Account limits (account=rcl, QOS=normal):",
                 "Job feasibility (account=rcl, QOS=normal):",
                 "Account limits (account=rcl, QOS=opportunistic):",
@@ -464,6 +476,27 @@ class MainTests(unittest.TestCase):
             notes=False,
         )
         self.assertEqual(text.count("Run command: sbatch holds"), 1)
+
+    def test_probes_assigned_qos_missing_from_cache_with_its_account(self):
+        self.assignments_mock.return_value = {"rcl": ["large"]}
+
+        text = self.render()
+
+        self.probe_mock.assert_called_once_with(
+            CAPACITIES, account="rcl", qos="large", cpus_per_task=12, mem="96G"
+        )
+        self.print_probe_mock.assert_called_once_with(
+            [],
+            title="Job feasibility (account=rcl, QOS=large)",
+            sort_by_start=True,
+            clean=rcl.clean_result,
+            notes=False,
+        )
+        self.assertIn(
+            "Account limits (account=rcl, QOS=large): "
+            "unavailable in the controller cache.",
+            text,
+        )
 
 
 class AccountLimitsTests(unittest.TestCase):
@@ -530,6 +563,11 @@ QOS=limited(2)
     User Limits
         No Users
 """
+
+    def setUp(self):
+        self.assignments_mock = self.enterContext(
+            patch.object(common, "fetch_user_account_qos", return_value=None)
+        )
 
     def render(self, job_counts=None):
         output = StringIO()
@@ -640,7 +678,7 @@ QOS=limited(2)
 
         self.assertEqual(
             reported,
-            {"rcl": {"normal": records["normal"], "opportunistic": records["opportunistic"]}},
+            {"rcl": records},
         )
 
     @patch.object(common, "fetch_user_job_counts")
@@ -662,8 +700,8 @@ QOS=limited(2)
         self.assertEqual(
             reported,
             {
-                "guests": {"limited": records["limited"]},
-                "rcl": {"normal": records["normal"], "opportunistic": records["opportunistic"]},
+                "guests": records,
+                "rcl": records,
             },
         )
         text = output.getvalue()
@@ -677,7 +715,7 @@ QOS=limited(2)
         for assoc_mgr in (
             None,
             self.ASSOC_MGR.replace("UserName=me(24918)", "UserName="),
-            self.ASSOC_MGR.replace("      guests", "      other"),
+            self.ASSOC_MGR.partition("QOS Records")[0],
         ):
             with (
                 self.subTest(assoc_mgr=assoc_mgr and assoc_mgr[-40:]),
@@ -687,16 +725,17 @@ QOS=limited(2)
                 self.assertEqual(rcl.print_account_limits("me"), {})
 
     @patch.object(common, "fetch_assoc_mgr")
-    def test_notes_when_no_qos_lists_the_account(self, assoc_mock):
-        assoc_mock.return_value = self.ASSOC_MGR.replace("      guests", "      other")
+    def test_notes_when_no_qos_records_are_cached(self, assoc_mock):
+        assoc_mock.return_value = self.ASSOC_MGR.partition("QOS Records")[0]
 
         self.assertIn("no QOS found", self.render())
 
     @patch.object(common, "fetch_user_job_counts")
     @patch.object(common, "fetch_assoc_mgr")
-    def test_reports_each_matching_qos_with_its_own_limits_and_usage(
+    def test_reports_each_assigned_qos_with_its_own_limits_and_usage(
         self, assoc_mock, counts_mock
     ):
+        self.assignments_mock.return_value = {"rcl": ["normal", "opportunistic"]}
         assoc_mock.return_value = self.MULTI_QOS_ASSOC_MGR
         counts = {
             "normal": {"running": 1, "pending": 0, "total": 1},
@@ -725,6 +764,100 @@ QOS=limited(2)
         self.assertEqual(
             counts_mock.call_args_list,
             [call("me", qos="normal"), call("me", qos="opportunistic")],
+        )
+
+    @patch.object(common, "fetch_assoc_mgr")
+    def test_reports_assigned_large_without_a_cached_account_entry(self, assoc_mock):
+        self.assignments_mock.return_value = {"rcl": ["large"]}
+        assoc_mock.return_value = self.MULTI_QOS_ASSOC_MGR.replace(
+            "QOS=limited(2)", "QOS=large(2)"
+        )
+
+        text = self.render()
+
+        self.assignments_mock.assert_called_once_with("me", "rcl")
+        self.assertIn("account=rcl, QOS=large", text)
+        self.assertRegex(text, r"CPUs per job\s+\|\s+8\s+\|\s+-")
+        self.assertNotIn("QOS=normal", text)
+        self.assertNotIn("QOS=opportunistic", text)
+        self.assertNotIn("QOS assignments unavailable", text)
+
+    @patch.object(common, "fetch_assoc_mgr")
+    def test_fallback_reports_large_without_a_cached_account_entry(self, assoc_mock):
+        for account_limits in (
+            "    Account Limits\n      other\n        MaxJobsPA=N(1)\n",
+            "    Account Limits\n        No Accounts\n",
+        ):
+            with self.subTest(account_limits=account_limits):
+                assoc_mock.return_value = self.NORMAL_ASSOC_MGR + (
+                    "QOS=large(3)\n"
+                    "    MaxTRESPJ=gres/gpu=4\n"
+                    + account_limits
+                    + "    User Limits\n        No Users\n"
+                )
+
+                text = self.render()
+
+                self.assertIn("account=rcl, QOS=large", text)
+                self.assertIn("account=rcl, QOS=normal", text)
+                self.assertRegex(text, r"GPUs per job\s+\|\s+4\s+\|\s+-")
+                self.assertIn(
+                    "QOS assignments unavailable; checking all cached QOS names "
+                    "for each account.",
+                    text,
+                )
+                self.assertIn(
+                    "Feasibility probes show whether each request is accepted.", text
+                )
+
+    @patch.object(common, "fetch_user_job_counts")
+    @patch.object(common, "fetch_assoc_mgr")
+    def test_empty_assignments_do_not_fall_back_to_cached_accounts(
+        self, assoc_mock, counts_mock
+    ):
+        self.assignments_mock.return_value = {}
+        assoc_mock.return_value = self.NORMAL_ASSOC_MGR
+        after_each = Mock()
+        output = StringIO()
+
+        with redirect_stdout(output):
+            reported = rcl.print_account_limits("me", after_each=after_each)
+
+        self.assertEqual(reported, {})
+        after_each.assert_not_called()
+        counts_mock.assert_not_called()
+        self.assertNotIn("QOS=normal", output.getvalue())
+        self.assertNotIn("QOS assignments unavailable", output.getvalue())
+
+    @patch.object(common, "fetch_assoc_mgr")
+    def test_notes_when_the_assigned_account_has_no_qos(self, assoc_mock):
+        self.assignments_mock.return_value = {"rcl": []}
+        assoc_mock.return_value = self.NORMAL_ASSOC_MGR
+
+        text = self.render()
+
+        self.assertIn("no QOS found for account 'rcl'", text)
+        self.assertNotIn("QOS=normal", text)
+
+    @patch.object(common, "fetch_user_job_counts", return_value=None)
+    @patch.object(common, "fetch_assoc_mgr")
+    def test_preserves_assigned_qos_missing_from_cache_for_probes(
+        self, assoc_mock, counts_mock
+    ):
+        self.assignments_mock.return_value = {"rcl": ["large"]}
+        assoc_mock.return_value = self.NORMAL_ASSOC_MGR
+        after_each = Mock()
+        output = StringIO()
+
+        with redirect_stdout(output):
+            reported = rcl.print_account_limits("me", after_each=after_each)
+
+        self.assertEqual(reported, {"rcl": {"large": None}})
+        after_each.assert_called_once_with("rcl", "large", None)
+        self.assertIn(
+            "Account limits (account=rcl, QOS=large): "
+            "unavailable in the controller cache.",
+            output.getvalue(),
         )
 
     @patch.object(common, "fetch_assoc_mgr")

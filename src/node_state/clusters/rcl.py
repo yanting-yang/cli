@@ -31,7 +31,10 @@ def max_gpu_counts(gpu_capacities, record, user):
     The tightest per-user (`MaxTRESPU`) or per-job (`MaxTRESPJ`) cap in the QOS
     `record`, on the model or on all GPUs combined, bounds the count along with
     one node's capacity. A zero cap still probes one GPU to surface the reason.
+    An unavailable QOS record leaves node capacity as the only known bound.
     """
+    if record is None:
+        return gpu_capacities.copy()
     counts = {}
     for gpu, capacity in gpu_capacities.items():
         caps = [
@@ -114,43 +117,60 @@ def format_limit(value):
 
 
 def print_account_limits(user, after_each=None):
-    """Report caps for each QOS listing each of the user's accounts.
+    """Report assigned QOS caps, or check all cached QOSs for each account.
 
-    The controller cache can list an account under several QOS records; each
-    gets its own table because their limits and usage are independent.
-    `after_each(account, qos_name, record)` runs right after each table.
-    Returns the reported records as `{account: {qos_name: record}}`, empty when
-    none could be read.
+    Cached Account Limits entries track usage, not QOS permissions. When
+    accounting is unavailable, every cached QOS is a candidate, even if the
+    account has no usage entry. Feasibility probes test each candidate pair.
+    `after_each(account, qos_name, record)` runs right after each table or
+    unavailable-limits notice. Returns `{account: {qos_name: record}}`, with
+    None for an assigned QOS missing from the cache, or {} when no pairs exist.
     """
     output = common.fetch_assoc_mgr()
     if output is None:
         print("Account limits: unavailable ('scontrol show assoc_mgr' failed).\n")
         return {}
 
-    accounts = common.parse_user_accounts(output, user)
-    if not accounts:
+    qos_records = common.parse_qos_records(output)
+    account_qos = common.fetch_user_account_qos(user, "rcl")
+    if account_qos is None:
+        account_qos = {
+            account: sorted(qos_records)
+            for account in common.parse_user_accounts(output, user)
+        }
+        print(
+            "QOS assignments unavailable; checking all cached QOS names for each "
+            "account. Feasibility probes show whether each request is accepted.\n"
+        )
+    if not account_qos:
         print(f"Account limits: no Slurm association found for '{user}'.\n")
         return {}
 
-    qos_records = common.parse_qos_records(output)
     counts_by_qos = {}
     reported = {}
-    for account in accounts:
-        qos_names = common.qos_names_for_account(qos_records, account)
+    for account, qos_names in sorted(account_qos.items()):
         if not qos_names:
             print(f"Account limits: no QOS found for account '{account}'.\n")
             continue
-        for qos_name in qos_names:
-            if qos_name not in counts_by_qos:
-                counts_by_qos[qos_name] = (
-                    common.fetch_user_job_counts(user, qos=qos_name) or {}
+        reported[account] = {}
+        for qos_name in sorted(qos_names):
+            record = qos_records.get(qos_name)
+            if record is None:
+                print(
+                    f"Account limits (account={account}, QOS={qos_name}): "
+                    "unavailable in the controller cache.\n"
                 )
-            print_qos_limits(
-                account, qos_name, qos_records[qos_name], user, counts_by_qos[qos_name]
-            )
+            else:
+                if qos_name not in counts_by_qos:
+                    counts_by_qos[qos_name] = (
+                        common.fetch_user_job_counts(user, qos=qos_name) or {}
+                    )
+                print_qos_limits(
+                    account, qos_name, record, user, counts_by_qos[qos_name]
+                )
             if after_each is not None:
-                after_each(account, qos_name, qos_records[qos_name])
-        reported[account] = {name: qos_records[name] for name in qos_names}
+                after_each(account, qos_name, record)
+            reported[account][qos_name] = record
     return reported
 
 
