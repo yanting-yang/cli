@@ -22,12 +22,12 @@ uv run node_state rcl      # cluster-specific report: killarney, rcl, tamia, vul
 `killarney`, `rcl` and `tamia` accept options for their feasibility probes:
 
 ```bash
-uv run node_state rcl --cpus-per-task 8 --mem 64G --sort-by-start
+uv run node_state rcl -c8 --mem 64G --sort-by-start
 ```
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `--cpus-per-task` | `4` | CPUs requested by each probe |
+| `-c` | `4` | CPUs requested by each probe |
 | `--mem` | `32G` | Memory requested by each probe |
 | `--sort-by-start` | off | Sort by estimated start; unrunnable requests last |
 

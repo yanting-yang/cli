@@ -25,10 +25,12 @@ def main(argv=None):
     for cluster_name in PROBE_CLUSTERS:
         probe_parser = cluster_parsers[cluster_name]
         probe_parser.add_argument(
-            "--cpus-per-task",
+            "-c",
+            dest="cpus_per_task",
             type=int,
             default=4,
             metavar="4",
+            help="CPUs per task for each probe",
         )
         probe_parser.add_argument(
             "--mem",
