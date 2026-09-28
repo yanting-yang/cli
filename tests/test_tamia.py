@@ -119,7 +119,7 @@ class RunProbesTests(unittest.TestCase):
             with self.subTest(directives=probe_call.args[0]):
                 self.assertEqual(probe_call.kwargs["command"], ("bash",))
                 self.assertIn("--test-only", probe_call.args[0])
-                self.assertIn("--time=0-03:00:00", probe_call.args[0])
+                self.assertIn("-t0-03:00:00", probe_call.args[0])
 
     def test_builds_copyable_run_commands_that_repeat_each_probe(self):
         for result in self.results:
@@ -129,14 +129,14 @@ class RunProbesTests(unittest.TestCase):
         self.assertEqual(
             [result["run_command"] for result in self.results
              if result["command"] == "srun"][0],
-            "srun --test-only --gres=gpu:h100:4 --cpus-per-task=4 --mem=32G "
-            "--time=0-03:00:00 --pty zsh",
+            "srun --test-only --gres=gpu:h100:4 -c4 --mem=32G "
+            "-t0-03:00:00 --pty zsh",
         )
         self.assertEqual(
             [result["run_command"] for result in self.results
              if result["command"] == "sbatch"][0],
-            "sbatch --test-only --gres=gpu:h100:4 --cpus-per-task=4 --mem=32G "
-            "--time=0-03:00:00 "
+            "sbatch --test-only --gres=gpu:h100:4 -c4 --mem=32G "
+            "-t0-03:00:00 "
             '--wrap="sleep infinity"',
         )
 

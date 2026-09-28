@@ -59,7 +59,7 @@ def scope_accepted(account, qos):
     the pair. Any other outcome, including a failed probe, keeps the pair.
     """
     result = common.run_sbatch_test(
-        ["--test-only", f"--account={account}", f"--qos={qos}", f"--time={PROBE_TIME}"]
+        ["--test-only", f"--account={account}", f"--qos={qos}", f"-t{PROBE_TIME}"]
     )
     return not INVALID_SCOPE.search(result["result"])
 

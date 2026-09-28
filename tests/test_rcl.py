@@ -149,8 +149,8 @@ class RunProbesTests(unittest.TestCase):
         self.assertEqual(self.srun_mock.call_count, 5)
         self.assertEqual(
             self.sbatch_mock.call_args_list[-1].args[0],
-            ["--test-only", "--account=rcl", "--qos=normal", "--cpus-per-task=8",
-             "--mem=64G", f"--time={rcl.PROBE_TIME}"],
+            ["--test-only", "--account=rcl", "--qos=normal", "-c8",
+             "--mem=64G", f"-t{rcl.PROBE_TIME}"],
         )
 
     def test_pins_account_and_qos_on_every_probe(self):
@@ -160,9 +160,9 @@ class RunProbesTests(unittest.TestCase):
                     probe_call.args[0][:3],
                     ["--test-only", "--account=rcl", "--qos=normal"],
                 )
-                self.assertIn("--cpus-per-task=8", probe_call.args[0])
+                self.assertIn("-c8", shlex.join(probe_call.args[0]))
                 self.assertIn("--mem=64G", probe_call.args[0])
-                self.assertIn(f"--time={rcl.PROBE_TIME}", probe_call.args[0])
+                self.assertIn(f"-t{rcl.PROBE_TIME}", probe_call.args[0])
                 self.assertFalse(
                     any(
                         item.startswith(("--partition", "-p"))
@@ -208,12 +208,12 @@ class RunProbesTests(unittest.TestCase):
         self.assertIn(
             "sbatch --test-only --account=rcl --qos=normal "
             "--gres=gpu:nvidia_b200_2g.45gb:3 "
-            '--cpus-per-task=8 --mem=64G --time=0-01:00:00 --wrap="sleep infinity"',
+            '-c8 --mem=64G -t0-01:00:00 --wrap="sleep infinity"',
             run_commands,
         )
         self.assertIn(
-            "srun --test-only --account=rcl --qos=normal --cpus-per-task=8 "
-            "--mem=64G --time=0-01:00:00 --pty zsh",
+            "srun --test-only --account=rcl --qos=normal -c8 "
+            "--mem=64G -t0-01:00:00 --pty zsh",
             run_commands,
         )
 
@@ -258,7 +258,7 @@ class ScopeAcceptedTests(unittest.TestCase):
 
         sbatch_mock.assert_called_once_with(
             ["--test-only", "--account=guests", "--qos=large",
-             f"--time={rcl.PROBE_TIME}"]
+             f"-t{rcl.PROBE_TIME}"]
         )
 
     def test_rejects_a_pair_slurm_reports_as_invalid(self):

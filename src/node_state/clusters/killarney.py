@@ -25,10 +25,11 @@ def build_directives(
     directives = ["--test-only"]
     if gpu:
         directives.append(f"--gres=gpu:{gpu}:{gpu_count}")
+    # -c/-t are --cpus-per-task/--time, kept short for the Run command column.
     directives += [
-        f"--cpus-per-task={cpus_per_task}",
+        f"-c{cpus_per_task}",
         f"--mem={mem}",
-        f"--time={time_limit}",
+        f"-t{time_limit}",
     ]
     return directives
 

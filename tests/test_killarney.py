@@ -20,9 +20,9 @@ class BuildDirectivesTests(unittest.TestCase):
 
         self.assertIn("--test-only", directives)
         self.assertIn("--gres=gpu:h100:8", directives)
-        self.assertIn("--cpus-per-task=4", directives)
+        self.assertIn("-c4", shlex.join(directives))
         self.assertIn("--mem=32G", directives)
-        self.assertIn("--time=7-00:00:00", directives)
+        self.assertIn("-t7-00:00:00", directives)
 
     def test_omits_gpu_and_partition_for_a_cpu_only_probe(self):
         directives = killarney.build_directives(cpus_per_task=4, mem="32G")
@@ -38,7 +38,7 @@ class BuildDirectivesTests(unittest.TestCase):
             mem="96G",
         )
 
-        self.assertIn("--cpus-per-task=12", directives)
+        self.assertIn("-c12", shlex.join(directives))
         self.assertIn("--mem=96G", directives)
 
 
@@ -57,12 +57,12 @@ class RunProbesTests(unittest.TestCase):
         results = killarney.run_probes({}, cpus_per_task=12, mem="96G")
 
         for call in sbatch_mock.call_args_list + srun_mock.call_args_list:
-            self.assertIn("--cpus-per-task=12", call.args[0])
+            self.assertIn("-c12", shlex.join(call.args[0]))
             self.assertIn("--mem=96G", call.args[0])
         self.assertNotIn("label", result)
         for probe in results:
             arguments = shlex.split(probe["run_command"])
-            self.assertIn("--cpus-per-task=12", arguments)
+            self.assertIn("-c12", probe["run_command"])
             self.assertIn("--mem=96G", arguments)
         self.assertEqual(
             [probe["command"] for probe in results],
@@ -121,13 +121,13 @@ class RunProbesTests(unittest.TestCase):
         actual_gpu_directives = {
             (
                 next(item for item in call.args[0] if item.startswith("--gres=")),
-                next(item for item in call.args[0] if item.startswith("--time=")),
+                next(item for item in call.args[0] if item.startswith("-t")),
             )
             for call in sbatch_mock.call_args_list
             if any(item.startswith("--gres=") for item in call.args[0])
         }
         expected_gpu_directives = {
-            (f"--gres=gpu:{gpu}:{count}", f"--time={time_limit}")
+            (f"--gres=gpu:{gpu}:{count}", f"-t{time_limit}")
             for gpu, capacity in (("h100", 8), ("l40s", 4))
             for count in range(1, capacity + 1)
             for time_limit in killarney.PROBE_TIMES
@@ -138,12 +138,12 @@ class RunProbesTests(unittest.TestCase):
             {
                 (
                     next(item for item in call.args[0] if item.startswith("--gres=")),
-                    next(item for item in call.args[0] if item.startswith("--time=")),
+                    next(item for item in call.args[0] if item.startswith("-t")),
                 )
                 for call in srun_mock.call_args_list
                 if any(item.startswith("--gres=") for item in call.args[0])
             },
-            {(f"--gres=gpu:l40s:{count}", "--time=0-03:00:00") for count in range(1, 5)},
+            {(f"--gres=gpu:l40s:{count}", "-t0-03:00:00") for count in range(1, 5)},
         )
         cpu_srun_directives = [
             call.args[0]
@@ -151,7 +151,7 @@ class RunProbesTests(unittest.TestCase):
             if not any(item.startswith("--gres=") for item in call.args[0])
         ]
         self.assertEqual(len(cpu_srun_directives), 1)
-        self.assertIn("--time=0-03:00:00", cpu_srun_directives[0])
+        self.assertIn("-t0-03:00:00", cpu_srun_directives[0])
         self.assertEqual(
             [
                 (result["label"], result["time"], result["command"])
@@ -506,7 +506,7 @@ class ProbeReportTests(unittest.TestCase):
         results = [
             {
                 "label": "late request",
-                "run_command": "sbatch --cpus-per-task=12 --mem=96G --time=3:00:00 late.sh",
+                "run_command": "sbatch -c12 --mem=96G -t3:00:00 late.sh",
                 "time": "3:00:00",
                 "command": "sbatch",
                 "start_time": "2026-08-02T12:00:00",
@@ -515,7 +515,7 @@ class ProbeReportTests(unittest.TestCase):
             },
             {
                 "label": "unrunnable request",
-                "run_command": "sbatch --cpus-per-task=12 --mem=96G --time=3:00:00 blocked.sh",
+                "run_command": "sbatch -c12 --mem=96G -t3:00:00 blocked.sh",
                 "time": "3:00:00",
                 "command": "sbatch",
                 "start_time": None,
@@ -524,7 +524,7 @@ class ProbeReportTests(unittest.TestCase):
             },
             {
                 "label": "early request",
-                "run_command": "sbatch --cpus-per-task=12 --mem=96G --time=3:00:00 early.sh",
+                "run_command": "sbatch -c12 --mem=96G -t3:00:00 early.sh",
                 "time": "3:00:00",
                 "command": "sbatch",
                 "start_time": "2026-08-01T12:00:00",
@@ -589,7 +589,7 @@ class ProbeReportTests(unittest.TestCase):
         results = [
             {
                 "label": "8x h100",
-                "run_command": 'sbatch --test-only --gres=gpu:h100:8 --cpus-per-task=4 --mem=32G --time=7-00:00:00 --wrap="sleep infinity"',
+                "run_command": 'sbatch --test-only --gres=gpu:h100:8 -c4 --mem=32G -t7-00:00:00 --wrap="sleep infinity"',
                 "time": "7-00:00:00",
                 "command": "sbatch",
                 "start_time": "2026-08-01T12:00:00",
