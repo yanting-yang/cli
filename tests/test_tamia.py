@@ -121,21 +121,22 @@ class RunProbesTests(unittest.TestCase):
                 self.assertIn("--test-only", probe_call.args[0])
                 self.assertIn("--time=0-03:00:00", probe_call.args[0])
 
-    def test_builds_copyable_run_commands_without_test_only(self):
+    def test_builds_copyable_run_commands_that_repeat_each_probe(self):
         for result in self.results:
             with self.subTest(label=result["label"], command=result["command"]):
                 arguments = shlex.split(result["run_command"])
-                self.assertEqual(arguments[0], result["command"])
-                self.assertNotIn("--test-only", arguments)
+                self.assertEqual(arguments[:2], [result["command"], "--test-only"])
         self.assertEqual(
             [result["run_command"] for result in self.results
              if result["command"] == "srun"][0],
-            "srun --gres=gpu:h100:4 --cpus-per-task=4 --mem=32G --time=0-03:00:00 --pty bash",
+            "srun --test-only --gres=gpu:h100:4 --cpus-per-task=4 --mem=32G "
+            "--time=0-03:00:00 --pty zsh",
         )
         self.assertEqual(
             [result["run_command"] for result in self.results
              if result["command"] == "sbatch"][0],
-            "sbatch --gres=gpu:h100:4 --cpus-per-task=4 --mem=32G --time=0-03:00:00 "
+            "sbatch --test-only --gres=gpu:h100:4 --cpus-per-task=4 --mem=32G "
+            "--time=0-03:00:00 "
             '--wrap="sleep infinity"',
         )
 

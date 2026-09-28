@@ -571,10 +571,13 @@ def fetch_user_job_counts(user, qos=None):
 
 
 def format_run_command(command, directives):
-    """Format a runnable batch-allocation or interactive-shell request for copying."""
-    arguments = [command, *(arg for arg in directives if arg != "--test-only")]
+    """Format a probed batch-allocation or interactive-shell request for copying.
+
+    `--test-only` stays in, so the command repeats the probe; drop it to submit.
+    """
+    arguments = [command, *directives]
     if command == "srun":
-        return shlex.join([*arguments, "--pty", "bash"])
+        return shlex.join([*arguments, "--pty", "zsh"])
     # Double quotes are safe because SBATCH_WRAP has no shell metacharacters.
     return f'{shlex.join(arguments)} --wrap="{SBATCH_WRAP}"'
 

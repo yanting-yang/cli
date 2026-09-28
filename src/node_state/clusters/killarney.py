@@ -174,11 +174,13 @@ def print_probe_results(
     sort_by_start=False,
     clean=clean_result,
     notes=True,
+    time_and_partition=True,
 ):
     """Print one probe table, its run-command notes and any blocked reasons.
 
     Pass `notes=False` when printing several tables, then call
-    `print_run_command_notes` once.
+    `print_run_command_notes` once. `time_and_partition=False` leaves out the
+    Time and Partition columns.
     """
     runnable = sum(result["start_time"] is not None for result in results)
     print(f"{title}:")
@@ -194,11 +196,11 @@ def print_probe_results(
             ),
         )
 
+    headers = ["Request", "Time", "Can run", "Estimated start", "Partition", "Run command"]
     rows = [
         (
             result["label"],
             result["time"],
-            f"{result['command']} --test-only",
             "yes" if result["start_time"] else "no",
             result["start_time"] or "-",
             result["partition"] or "-",
@@ -206,13 +208,15 @@ def print_probe_results(
         )
         for result in displayed_results
     ]
-    common.print_table(
-        [
-            "Request", "Time", "Command", "Can run", "Estimated start", "Partition",
-            "Run command",
-        ],
-        rows,
-    )
+    if not time_and_partition:
+        kept = [
+            index
+            for index, header in enumerate(headers)
+            if header not in ("Time", "Partition")
+        ]
+        headers = [headers[index] for index in kept]
+        rows = [[row[index] for index in kept] for row in rows]
+    common.print_table(headers, rows)
     print()
 
     if notes:
@@ -231,12 +235,12 @@ def print_probe_results(
 
 def print_run_command_notes():
     print(
-        "Run command: sbatch holds the allocation with 'sleep infinity' until the "
-        "time limit; srun opens a Bash shell."
+        "Run command: drop --test-only to submit; sbatch then holds the allocation "
+        "with 'sleep infinity' until the time limit, and srun opens a Zsh shell."
     )
     print(
         "Open a shell in an sbatch allocation with "
-        "'srun --jobid=<jobid> --overlap --pty bash'; release it with 'scancel <jobid>'."
+        "'srun --jobid=<jobid> --overlap --pty zsh'; release it with 'scancel <jobid>'."
     )
     print()
 

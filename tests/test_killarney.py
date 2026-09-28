@@ -108,17 +108,13 @@ class RunProbesTests(unittest.TestCase):
                 arguments = shlex.split(result["run_command"])
                 self.assertEqual(arguments[0], result["command"])
                 suffix = (
-                    ["--pty", "bash"]
+                    ["--pty", "zsh"]
                     if result["command"] == "srun"
                     else ["--wrap=sleep infinity"]
                 )
                 self.assertEqual(arguments[-len(suffix):], suffix)
-                self.assertEqual(
-                    arguments[1:-len(suffix)],
-                    [arg for arg in probe_call.args[0] if arg != "--test-only"],
-                )
-                self.assertIn("--test-only", probe_call.args[0])
-                self.assertNotIn("--test-only", arguments)
+                self.assertEqual(arguments[1:-len(suffix)], probe_call.args[0])
+                self.assertIn("--test-only", arguments)
         self.assertEqual(sbatch_mock.call_count, 65)
         self.assertEqual(srun_mock.call_count, 5)
 
@@ -549,7 +545,7 @@ class ProbeReportTests(unittest.TestCase):
 
     BLOCKED = {
         "label": "3x h100",
-        "run_command": "srun --gres=gpu:h100:3 --pty bash",
+        "run_command": "srun --test-only --gres=gpu:h100:3 --pty zsh",
         "time": "3:00:00",
         "command": "srun",
         "start_time": None,
@@ -558,7 +554,7 @@ class ProbeReportTests(unittest.TestCase):
     }
     RUNNABLE = {
         "label": "1x h100",
-        "run_command": "sbatch --gres=gpu:h100:1",
+        "run_command": "sbatch --test-only --gres=gpu:h100:1",
         "time": "3:00:00",
         "command": "sbatch",
         "start_time": "2026-08-01T12:00:00",
@@ -593,7 +589,7 @@ class ProbeReportTests(unittest.TestCase):
         results = [
             {
                 "label": "8x h100",
-                "run_command": 'sbatch --gres=gpu:h100:8 --cpus-per-task=4 --mem=32G --time=7-00:00:00 --wrap="sleep infinity"',
+                "run_command": 'sbatch --test-only --gres=gpu:h100:8 --cpus-per-task=4 --mem=32G --time=7-00:00:00 --wrap="sleep infinity"',
                 "time": "7-00:00:00",
                 "command": "sbatch",
                 "start_time": "2026-08-01T12:00:00",
@@ -609,8 +605,13 @@ class ProbeReportTests(unittest.TestCase):
         text = output.getvalue()
         self.assertTrue(text.startswith("Job feasibility:\n"))
         self.assertNotIn("--test-only,", text)
-        self.assertRegex(text, r"Request\s+\| Time\s+\| Command\s+\| Can run")
-        self.assertRegex(text, r"\| sbatch --test-only \| yes")
+        self.assertRegex(
+            text,
+            r"Request\s+\| Time\s+\| Can run\s+\| Estimated start\s+\| Partition\s+"
+            r"\| Run command",
+        )
+        self.assertRegex(text, r"\| 7-00:00:00 \| yes\s+\|")
+        self.assertNotIn("Command ", text)
         self.assertNotIn("Account", text)
         self.assertIn("8x h100", text)
         self.assertIn("7-00:00:00", text)
@@ -618,9 +619,26 @@ class ProbeReportTests(unittest.TestCase):
         self.assertIn("Run command", text)
         self.assertIn(results[0]["run_command"], text)
         self.assertIn("holds the allocation with 'sleep infinity'", text)
-        self.assertIn("srun --jobid=<jobid> --overlap --pty bash", text)
+        self.assertIn("srun --jobid=<jobid> --overlap --pty zsh", text)
         self.assertIn("scancel <jobid>", text)
         self.assertNotIn("job.sh", text)
+
+    def test_can_leave_out_the_time_and_partition_columns(self):
+        output = StringIO()
+
+        with redirect_stdout(output):
+            killarney.print_probe_results([self.RUNNABLE], time_and_partition=False)
+        lines = output.getvalue().splitlines()
+
+        self.assertRegex(
+            lines[2], r"^Request\s+\| Can run \| Estimated start\s+\| Run command"
+        )
+        self.assertRegex(
+            lines[4],
+            r"^1x h100 \| yes\s+\| 2026-08-01T12:00:00 \| sbatch --test-only "
+            r"--gres=gpu:h100:1",
+        )
+        self.assertNotIn("gpubase_bygpu_b1", output.getvalue())
 
     def test_uses_the_given_title_and_can_leave_the_notes_to_the_caller(self):
         output = StringIO()
@@ -636,7 +654,7 @@ class ProbeReportTests(unittest.TestCase):
         self.assertTrue(
             text.startswith("Job feasibility (account=rcl, QOS=normal):\nRunnable: 0/1\n")
         )
-        self.assertNotIn("Run command: sbatch holds", text)
+        self.assertNotIn("Run command: drop --test-only", text)
         self.assertIn("  srun 3x h100 for 3:00:00: raw reason\n", text)
 
     def test_prints_the_run_command_notes_on_their_own(self):
@@ -648,10 +666,11 @@ class ProbeReportTests(unittest.TestCase):
         self.assertEqual(
             output.getvalue().splitlines(),
             [
-                "Run command: sbatch holds the allocation with 'sleep infinity' until "
-                "the time limit; srun opens a Bash shell.",
+                "Run command: drop --test-only to submit; sbatch then holds the "
+                "allocation with 'sleep infinity' until the time limit, and srun "
+                "opens a Zsh shell.",
                 "Open a shell in an sbatch allocation with "
-                "'srun --jobid=<jobid> --overlap --pty bash'; release it with "
+                "'srun --jobid=<jobid> --overlap --pty zsh'; release it with "
                 "'scancel <jobid>'.",
                 "",
             ],

@@ -812,6 +812,7 @@ class FormatRunCommandTests(unittest.TestCase):
             shlex.split(command),
             [
                 "sbatch",
+                "--test-only",
                 "--comment=two words; echo $HOME",
                 "--time=3:00:00",
                 "--wrap=sleep infinity",
@@ -827,14 +828,14 @@ class FormatRunCommandTests(unittest.TestCase):
 
         self.assertEqual(
             command,
-            'sbatch --gres=gpu:h100:2 --time=3:00:00 --wrap="sleep infinity"',
+            'sbatch --test-only --gres=gpu:h100:2 --time=3:00:00 --wrap="sleep infinity"',
         )
         self.assertNotIn("job.sh", command)
 
     def test_opens_an_interactive_shell_for_srun(self):
         command = common.format_run_command("srun", ["--test-only", "--time=3:00:00"])
 
-        self.assertEqual(command, "srun --time=3:00:00 --pty bash")
+        self.assertEqual(command, "srun --test-only --time=3:00:00 --pty zsh")
 
 
 if __name__ == "__main__":

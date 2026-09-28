@@ -13,7 +13,7 @@ PROBE_TIME = "0-01:00:00"
 # rcl reserves cores via CoreSpecCount, so CPUTot overstates what jobs can get.
 CPU_KEY = "cpu_efctv"
 
-CPU_ONLY_LABEL = "CPU only (no GPU)"
+CPU_ONLY_LABEL = "cpu"
 
 # The controller's reply when the caller may not use an account or QOS.
 INVALID_SCOPE = re.compile(r"Invalid (?:account|qos)", re.IGNORECASE)
@@ -50,45 +50,32 @@ def max_gpu_counts(gpu_capacities, record, user):
     return counts
 
 
+def scope_accepted(account, qos):
+    """Return False only when Slurm rejects `account` with `qos` as invalid.
+
+    Submits a minimal CPU-only `sbatch --test-only`, which passes rcl's submit
+    filter and lands in the `cpu` partition, whose AllowQos lists every QOS; an
+    invalid account or QOS reply therefore means the caller's associations lack
+    the pair. Any other outcome, including a failed probe, keeps the pair.
+    """
+    result = common.run_sbatch_test(
+        ["--test-only", f"--account={account}", f"--qos={qos}", f"--time={PROBE_TIME}"]
+    )
+    return not INVALID_SCOPE.search(result["result"])
+
+
 def run_probes(gpu_counts, *, account=None, qos=None, cpus_per_task, mem):
     """Probe 1..N GPUs of each type, plus CPU only, with both sbatch and srun.
 
-    Every probe pins `--account` and `--qos` when given. If Slurm rejects that
-    pair as invalid, only the CPU-only sbatch row is returned, since every other
-    request would fail the same way. Deliberately omits --partition: rcl routes
-    jobs to `mig`, `full` or `cpu` based on the GPU request, and passing -p only
-    triggers a rerouting notice.
+    Every probe pins `--account` and `--qos` when given. Deliberately omits
+    --partition: rcl routes jobs to `mig`, `full` or `cpu` based on the GPU
+    request, and passing -p only triggers a rerouting notice.
     """
     scope = [f"--account={account}"] if account else []
     scope += [f"--qos={qos}"] if qos else []
 
-    def probe(command, gpu, count, label):
-        directives = killarney.build_directives(
-            gpu,
-            count,
-            PROBE_TIME,
-            cpus_per_task=cpus_per_task,
-            mem=mem,
-        )
-        directives[1:1] = scope
-        if command == "sbatch":
-            result = common.run_sbatch_test(directives)
-        else:
-            result = common.run_srun_test(directives)
-        return {
-            **result,
-            "label": label,
-            "time": PROBE_TIME,
-            "command": command,
-            "run_command": common.format_run_command(command, directives),
-        }
-
-    cpu_only = probe("sbatch", None, 1, CPU_ONLY_LABEL)
-    if scope and INVALID_SCOPE.search(cpu_only["result"]):
-        return [cpu_only]
-
     requests = [
-        (gpu, count, f"{count}x {gpu}")
+        (gpu, count, f"{gpu}:{count}")
         for gpu, max_count in sorted(gpu_counts.items())
         for count in range(1, max_count + 1)
     ]
@@ -97,10 +84,27 @@ def run_probes(gpu_counts, *, account=None, qos=None, cpus_per_task, mem):
     results = []
     for command in ("sbatch", "srun"):
         for gpu, count, label in requests:
-            if (command, gpu) == ("sbatch", None):
-                results.append(cpu_only)
+            directives = killarney.build_directives(
+                gpu,
+                count,
+                PROBE_TIME,
+                cpus_per_task=cpus_per_task,
+                mem=mem,
+            )
+            directives[1:1] = scope
+            if command == "sbatch":
+                result = common.run_sbatch_test(directives)
             else:
-                results.append(probe(command, gpu, count, label))
+                result = common.run_srun_test(directives)
+            results.append(
+                {
+                    **result,
+                    "label": label,
+                    "time": PROBE_TIME,
+                    "command": command,
+                    "run_command": common.format_run_command(command, directives),
+                }
+            )
     return results
 
 
@@ -117,14 +121,18 @@ def format_limit(value):
 
 
 def print_account_limits(user, after_each=None):
-    """Report assigned QOS caps, or check all cached QOSs for each account.
+    """Report caps for each assigned QOS, or each cached QOS Slurm accepts.
 
     Cached Account Limits entries track usage, not QOS permissions. When
-    accounting is unavailable, every cached QOS is a candidate, even if the
-    account has no usage entry. Feasibility probes test each candidate pair.
-    `after_each(account, qos_name, record)` runs right after each table or
-    unavailable-limits notice. Returns `{account: {qos_name: record}}`, with
-    None for an assigned QOS missing from the cache, or {} when no pairs exist.
+    accounting is unavailable, every cached QOS is a candidate for each account,
+    even if the account has no usage entry, and pairs Slurm rejects as invalid
+    are dropped (`scope_accepted`).
+    `after_each(account, qos_name, record, account_is_default=...,
+    qos_is_default=...)` runs right after each table or unavailable-limits
+    notice. The flags mark what Slurm picks when a job omits it: the user's
+    default account, and a QOS that is the account's only one. Returns
+    `{account: {qos_name: record}}`, with None for an assigned QOS missing from
+    the cache, or {} when no pairs exist.
     """
     output = common.fetch_assoc_mgr()
     if output is None:
@@ -135,17 +143,22 @@ def print_account_limits(user, after_each=None):
     account_qos = common.fetch_user_account_qos(user, "rcl")
     if account_qos is None:
         account_qos = {
-            account: sorted(qos_records)
+            account: [
+                qos_name
+                for qos_name in sorted(qos_records)
+                if scope_accepted(account, qos_name)
+            ]
             for account in common.parse_user_accounts(output, user)
         }
         print(
-            "QOS assignments unavailable; checking all cached QOS names for each "
-            "account. Feasibility probes show whether each request is accepted.\n"
+            "QOS assignments unavailable; showing each cached QOS that Slurm "
+            "accepts for each account.\n"
         )
     if not account_qos:
         print(f"Account limits: no Slurm association found for '{user}'.\n")
         return {}
 
+    default_account = common.parse_default_account(output, user)
     counts_by_qos = {}
     reported = {}
     for account, qos_names in sorted(account_qos.items()):
@@ -169,7 +182,13 @@ def print_account_limits(user, after_each=None):
                     account, qos_name, record, user, counts_by_qos[qos_name]
                 )
             if after_each is not None:
-                after_each(account, qos_name, record)
+                after_each(
+                    account,
+                    qos_name,
+                    record,
+                    account_is_default=account == default_account,
+                    qos_is_default=len(qos_names) == 1,
+                )
             reported[account][qos_name] = record
     return reported
 
@@ -262,14 +281,18 @@ def main(args):
             sort_by_start=args.sort_by_start,
             clean=clean_result,
             notes=False,
+            time_and_partition=False,
         )
 
-    def print_qos_feasibility(account, qos_name, record):
+    def print_qos_feasibility(
+        account, qos_name, record, *, account_is_default, qos_is_default
+    ):
+        # Leave out what Slurm picks anyway, so the run commands stay short.
         print_feasibility(
             f"Job feasibility (account={account}, QOS={qos_name})",
             max_gpu_counts(gpu_capacities, record, user),
-            account,
-            qos_name,
+            None if account_is_default else account,
+            None if qos_is_default else qos_name,
         )
 
     # Each account limits table is followed by the probes for that pair; without
