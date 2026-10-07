@@ -3,134 +3,148 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from unittest.mock import Mock, patch
 
-from node_state import cli
-from node_state.clusters import killarney, rcl, tamia
+from node_state import cli, hosts, probes, profiles, snapshot
 
 
-class CliTests(unittest.TestCase):
-    def assert_parse_error(self, argv, message):
-        stderr = StringIO()
-        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
-            cli.main(argv)
+def profile_tables(**tables):
+    return patch.object(profiles, "load_profiles", return_value=tables)
 
-        self.assertEqual(raised.exception.code, 2)
-        self.assertIn(message, stderr.getvalue())
 
-    def test_registers_killarney(self):
-        self.assertIs(cli.CLUSTER_RUNNERS["killarney"], killarney.main)
+class FindClustersTests(unittest.TestCase):
+    def find(self, local_config, **tables):
+        with (
+            patch.object(hosts.Local, "run", return_value=local_config),
+            profile_tables(**tables),
+        ):
+            return cli.find_clusters()
 
-    def test_registers_tamia(self):
-        self.assertIs(cli.CLUSTER_RUNNERS["tamia"], tamia.main)
-
-    def test_registers_rcl(self):
-        self.assertIs(cli.CLUSTER_RUNNERS["rcl"], rcl.main)
-
-    def test_forwards_rcl_probe_options_with_defaults(self):
-        runner = Mock()
-        with patch.dict(cli.CLUSTER_RUNNERS, {"rcl": runner}):
-            cli.main(["rcl", "-c", "8", "--mem", "64G", "--sort-by-start"])
-            cli.main(["rcl"])
-
-        custom, default = (probe_call.args[0] for probe_call in runner.call_args_list)
-        self.assertEqual(custom.cpus_per_task, 8)
-        self.assertEqual(custom.mem, "64G")
-        self.assertTrue(custom.sort_by_start)
-        self.assertEqual(default.cpus_per_task, 4)
-        self.assertEqual(default.mem, "32G")
-        self.assertFalse(default.sort_by_start)
-
-    def test_accepts_c_with_or_without_a_space(self):
-        runner = Mock()
-        with patch.dict(cli.CLUSTER_RUNNERS, {"rcl": runner}):
-            cli.main(["rcl", "-c", "8"])
-            cli.main(["rcl", "-c16"])
-
-        self.assertEqual(
-            [probe_call.args[0].cpus_per_task for probe_call in runner.call_args_list],
-            [8, 16],
+    def test_lists_this_cluster_then_each_one_with_an_ssh_host(self):
+        clusters = self.find(
+            "ClusterName = killarney\n",
+            fir={"ssh": "fir.example.org"},
+            rcl={"walltimes": ["0-01:00:00"]},
+            tamia={"ssh": "tamia.example.org", "gpu_counts": "whole_node"},
         )
 
-    def test_forwards_tamia_probe_options(self):
-        runner = Mock()
-        with patch.dict(cli.CLUSTER_RUNNERS, {"tamia": runner}):
-            cli.main(["tamia", "-c", "8", "--mem", "64G", "--sort-by-start"])
+        self.assertEqual([c.name for c in clusters], ["killarney", "fir", "tamia"])
+        self.assertIsInstance(clusters[0].host, hosts.Local)
+        self.assertEqual(clusters[1].host.ssh, "fir.example.org")
+        self.assertEqual(clusters[2].profile.gpu_counts, "whole_node")
 
-        args = runner.call_args.args[0]
-        self.assertEqual(args.cpus_per_task, 8)
-        self.assertEqual(args.mem, "64G")
-        self.assertTrue(args.sort_by_start)
+    def test_skips_a_remote_entry_for_the_cluster_it_runs_on(self):
+        clusters = self.find(
+            "ClusterName = tamia\n", tamia={"ssh": "tamia.example.org"}
+        )
 
-    def test_uses_fallback_when_cluster_is_omitted(self):
-        runner = Mock()
-        with patch.object(cli.fallback, "main", runner):
+        self.assertEqual([c.name for c in clusters], ["tamia"])
+        self.assertIsNone(clusters[0].host.ssh)
+        self.assertEqual(clusters[0].profile.ssh, "tamia.example.org")
+
+    def test_shows_only_remote_clusters_where_slurm_is_missing(self):
+        clusters = self.find(None, fir={"ssh": "fir.example.org"})
+
+        self.assertEqual([c.name for c in clusters], ["fir"])
+
+
+class ConnectTests(unittest.TestCase):
+    def remote(self, name, error):
+        host = Mock(ssh=f"{name}.example.org")
+        host.check.return_value = error
+        host.login.return_value = True
+        return snapshot.Cluster(name, profiles.Profile(name), host)
+
+    def test_logs_in_only_where_a_prompt_is_needed(self):
+        ready = self.remote("fir", None)
+        needs_mfa = self.remote("tamia", "Permission denied (keyboard-interactive).")
+        stderr = StringIO()
+        with (
+            patch.object(cli.sys.stdin, "isatty", return_value=True),
+            redirect_stderr(stderr),
+        ):
+            cli.connect([ready, needs_mfa])
+
+        ready.host.login.assert_not_called()
+        needs_mfa.host.login.assert_called_once_with()
+        self.assertIn("connecting to tamia", stderr.getvalue())
+
+    def test_never_prompts_without_a_terminal(self):
+        needs_mfa = self.remote("tamia", "Permission denied.")
+        with patch.object(cli.sys.stdin, "isatty", return_value=False):
+            cli.connect([needs_mfa])
+
+        needs_mfa.host.login.assert_not_called()
+
+
+class MainTests(unittest.TestCase):
+    def setUp(self):
+        self.clusters = [
+            snapshot.Cluster("rcl", profiles.load_profile("rcl"), Mock(ssh=None))
+        ]
+        for target, name, value in [
+            (cli, "find_clusters", self.clusters),
+            (cli, "connect", None),
+            (cli.report, "print_reports", None),
+        ]:
+            patcher = patch.object(target, name, return_value=value)
+            setattr(self, name, patcher.start())
+            self.addCleanup(patcher.stop)
+
+    def test_prints_reports_when_output_is_not_a_terminal(self):
+        with patch.object(cli.sys.stdout, "isatty", return_value=False):
             cli.main([])
 
-        args = runner.call_args.args[0]
-        self.assertIsNone(args.cluster)
+        self.connect.assert_called_once_with(self.clusters)
+        self.print_reports.assert_called_once_with(self.clusters, probes.Settings())
 
-    def test_rejects_uppercase_cluster_name(self):
-        self.assert_parse_error(["KILLARNEY"], "invalid choice: 'KILLARNEY'")
+    def test_opens_the_dashboard_on_a_terminal(self):
+        app = Mock()
+        with (
+            patch.object(cli.sys.stdout, "isatty", return_value=True),
+            patch("node_state.tui.NodeStateApp", return_value=app) as app_class,
+        ):
+            cli.main([])
 
-    def test_forwards_killarney_probe_options(self):
-        runner = Mock()
-        with patch.dict(cli.CLUSTER_RUNNERS, {"killarney": runner}):
-            cli.main(
-                [
-                    "killarney",
-                    "-c",
-                    "12",
-                    "--mem",
-                    "96G",
-                    "--sort-by-start",
-                ]
-            )
+        self.print_reports.assert_not_called()
+        app_class.assert_called_once_with(self.clusters, probes.Settings())
+        app.run.assert_called_once_with()
 
-        args = runner.call_args.args[0]
-        self.assertEqual(args.cpus_per_task, 12)
-        self.assertEqual(args.mem, "96G")
-        self.assertTrue(args.sort_by_start)
+    def test_accepts_no_arguments(self):
+        for argv in (["rcl"], ["-c", "8"], ["--text"]):
+            stderr = StringIO()
+            with (
+                self.subTest(argv=argv),
+                redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                cli.main(argv)
 
-    def test_sets_default_killarney_probe_resources(self):
-        runner = Mock()
-        with patch.dict(cli.CLUSTER_RUNNERS, {"killarney": runner}):
-            cli.main(["killarney"])
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn("unrecognized arguments", stderr.getvalue())
+        self.find_clusters.assert_not_called()
 
-        args = runner.call_args.args[0]
-        self.assertEqual(args.cpus_per_task, 4)
-        self.assertEqual(args.mem, "32G")
-
-    def test_rejects_the_long_cpus_per_task_option(self):
-        self.assert_parse_error(
-            ["rcl", "--cpus-per-task", "8"],
-            "unrecognized arguments: --cpus-per-task 8",
-        )
-
-    def test_rejects_probe_options_for_other_clusters(self):
-        self.assert_parse_error(
-            ["vulcan", "--mem", "96G"],
-            "unrecognized arguments: --mem 96G",
-        )
-
-    def test_scopes_probe_options_to_killarney_help(self):
-        top_level_output = StringIO()
-        with redirect_stdout(top_level_output), self.assertRaises(SystemExit) as raised:
+    def test_still_explains_itself_with_help(self):
+        stdout = StringIO()
+        with redirect_stdout(stdout), self.assertRaises(SystemExit) as raised:
             cli.main(["--help"])
 
         self.assertEqual(raised.exception.code, 0)
-        self.assertIn("{killarney,rcl,tamia,vulcan}", top_level_output.getvalue())
-        self.assertNotIn("-c 4", top_level_output.getvalue())
+        self.assertIn("clusters.toml", stdout.getvalue())
 
-        killarney_output = StringIO()
-        with redirect_stdout(killarney_output), self.assertRaises(SystemExit) as raised:
-            cli.main(["killarney", "--help"])
+    def test_exits_with_a_message_for_a_broken_config(self):
+        self.find_clusters.side_effect = ValueError("bad setting")
+        with self.assertRaises(SystemExit) as raised:
+            cli.main([])
 
-        self.assertEqual(raised.exception.code, 0)
-        self.assertIn("-c 4", killarney_output.getvalue())
-        self.assertIn("--mem", killarney_output.getvalue())
-        self.assertIn("--sort-by-start", killarney_output.getvalue())
+        self.assertIn("bad setting", str(raised.exception.code))
 
-    def test_rejects_an_unsupported_cluster(self):
-        self.assert_parse_error(["other"], "invalid choice: 'other'")
+    def test_exits_when_there_is_nothing_to_show(self):
+        self.find_clusters.return_value = []
+        with self.assertRaises(SystemExit) as raised:
+            cli.main([])
+
+        self.assertIn(
+            "no cluster in clusters.toml has an ssh host", str(raised.exception.code)
+        )
 
 
 if __name__ == "__main__":

@@ -1,136 +1,160 @@
 # cli
 
-Slurm cluster inspection utilities. Currently one command, `node_state`, which shows
-what hardware is free and which jobs you could run right now.
+Slurm cluster inspection utilities. Currently one command, `node_state`: a terminal
+dashboard, in the spirit of [slurmtop](https://github.com/hunoutl/slurmtop) and
+[slmtop](https://github.com/dawnmy/slmtop), that answers "where can I run, under which
+account/QOS, and when would it start?"
+
+```
+ killarney  fir  tamia
+╸━━━━━━━━━╺━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ yanting@klogin02  killarney  Slurm 25.05.9                                                     updated 14:41:06 (9s ago) · probed 14:41:08
+╭─ Partitions ─────────────────────────────────────────────────────────────────────╮╭─ Accounts & QOS ─────────────────────────────────────╮
+│ Partition        Use  Load           Free         Idle   Pend  Max               ││ Account      QOS      Jobs  GPUs  Wall        FS     │
+│ gpubase_h100_b1  yes  █████▒▒░  62%  14/80 h100   0/10   36    0-03:00:00        ││ aip-xli135*  interac  0/1   ∞     0-03:00:00  0.08   │
+│ gpubase_h100_b2  yes  █████▒░░  66%  14/64 h100   0/8    48    0-12:00:00        ││ aip-xli135*  normal*  0/∞   ∞     ∞           0.08   │
+│ gpubase_l40s_b1  yes  ██████▒░  81%  31/672 l40s  0/168  6941  0-03:00:00        ││                                                      │
+│ gpubase_l40s_b3  yes  ██████▒░  78%  16/336 l40s  0/84   205   1-00:00:00        ││                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────╯╰─────────────────────────── * default · enter: probe ─╯
+╭─ Start estimates · aip-xli135/normal ────────────────────────────────────────────╮╭─ My jobs ────────────────────────────────────────────╮
+│ Request   0-03:00:00   0-12:00:00   1-00:00:00   3-00:00:00   7-00:00:00         ││ Job                   Name  St  Time  Start / where  │
+│ 1x h100    0-08:35:00   0-18:14:00   1-09:39:00  15-08:19:00  64-14:33:00        ││ No jobs in the queue                                 │
+│ 8x h100    0-10:36:00   0-20:15:00   1-11:40:00  16-22:36:00  64-14:33:00        ││                                                      │
+│ 1x l40s    1-17:02:00   2-06:43:00   0-10:54:00   1-20:17:00   5-20:30:00        ││                                                      │
+│ CPU only   1-17:02:00   2-06:43:00   0-10:54:00   1-20:17:00   5-19:38:00        ││                                                      │
+╰─────────────────────────────────────────────────────────── sbatch -c4 --mem=32G ─╯╰──────────────────────────────────────────────────────╯
+╭─ Details ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ 1x l40s for 1-00:00:00  aip-xli135/normal                                                                                                │
+│ Estimated start 2026-10-08 01:35 (0-10:54:00) in partition gpubase_l40s_b3                                                               │
+│ $ sbatch --test-only --gres=gpu:l40s:1 -c4 --mem=32G -t1-00:00:00 --wrap="sleep infinity"                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ r Refresh  p Re-probe  a Account/QOS  e Edit request  m sbatch/srun  c Copy command  n Nodes  q Quit  ] Next cluster  ? Keys  ▏^p palette
+```
 
 ## Requirements
 
 - Python 3.12 and [uv](https://docs.astral.sh/uv/)
-- A Slurm login node (`scontrol` on `PATH`; probes also need `sbatch`/`srun`)
+- A Slurm login node (`scontrol` and `squeue` on `PATH`; estimates need `sbatch`/`srun`)
 
 ## Usage
 
 ```bash
 # Without cloning
-uvx --from git+https://github.com/yanting-yang/cli node_state rcl
+uvx --from git+https://github.com/yanting-yang/cli node_state
 
 # From a checkout
-uv run node_state          # generic resource summary for any cluster
-uv run node_state rcl      # cluster-specific report: killarney, rcl, tamia, vulcan
+uv run node_state                # one tab per cluster: this one, then remote ones
+uv run node_state > report.txt   # text report of every cluster when not a terminal
 ```
 
-`killarney`, `rcl` and `tamia` accept options for their feasibility probes:
+There are no options. The first tab is the cluster you are logged in to (from
+`ClusterName` in `scontrol show config`); every cluster with an `ssh` host in
+[`clusters.toml`](clusters.toml) (Fir and Tamia here) gets a tab of its own, read over
+ssh. Every probe starts as 4 CPUs and 32 GB at each partition time limit with
+`sbatch`; change a tab's request with `e` (CPUs, memory, walltimes, extra `sbatch`
+options) and `m` (`sbatch`/`srun`). The visible tab refreshes every minute and
+re-probes every five.
 
-```bash
-uv run node_state rcl -c8 --mem 64G --sort-by-start
-```
+Probes use `--test-only`, so no job is ever submitted and it is safe to run on a shared
+login node. Run it on the login node: on a compute node, such as inside an interactive
+job, `srun` probes fail with "Requested operation is presently disabled".
 
-| Option | Default | Effect |
-| --- | --- | --- |
-| `-c` | `4` | CPUs requested by each probe |
-| `--mem` | `32G` | Memory requested by each probe |
-| `--sort-by-start` | off | Sort by estimated start; unrunnable requests last |
+### Remote clusters
 
-Probes use `--test-only`, so no job is ever submitted and it is safe to run on a
-shared login node. Run it on the login node: on a compute node, such as inside an
-interactive job, the `srun` probes fail with "Requested operation is presently
-disabled".
+Remote tabs run Slurm on the cluster's login node through `ssh`, with your
+`~/.ssh/config` (aliases, users, keys). Before the dashboard opens, `node_state` checks
+each remote and, if ssh needs a password or MFA, asks for it in the terminal once. It
+reuses an ssh control master for every later command: yours if your config sets
+`ControlMaster`, otherwise its own, which closes 10 minutes after the last use. If a
+connection drops, the tab says why; press `l` to log in again without leaving the
+dashboard.
 
-## Clusters
+Each refresh of a remote tab is one ssh session, and the cache of limits is fetched
+only for your accounts and QOS, because login nodes can take seconds to start a
+session and the full cache can be tens of MB. Commands for a remote cluster are shown
+with its host as the prompt (`fir.alliancecan.ca$ sbatch ...`): run them there.
 
-Every report starts with a table per hardware type of total, allocated and available
-CPUs, memory and GPUs, headed by the type's node count, e.g. `(1/1)`.
+### Keys
 
-| Subcommand | Adds |
+| Key | Action |
 | --- | --- |
-| *(none)* | Nothing else; no site-specific rules |
-| `killarney` | Partition table, account limits, and `sbatch` probes for 1–8 H100s, 1–4 L40Ss and CPU-only at 3 h, 12 h, 1 d, 3 d and 7 d, plus 3 h `srun` probes for 1–4 L40Ss and CPU-only |
-| `tamia` | As Killarney, but GPUs are probed only as whole nodes and only up to the 1-day walltime cap |
-| `rcl` | Account limits and one-hour `sbatch`/`srun` probes for each account/QOS you can use |
-| `vulcan` | One `sbatch` probe per GPU node (1 L40S, 16 CPUs, 128 GB, 3 h), then a summary of the nodes that can run it (runnable/all GPU nodes) |
+| `]` / `[` | Next / previous cluster tab |
+| `1`–`4`, `Tab` | Focus Partitions, Accounts & QOS, Start estimates, My jobs |
+| arrows | Move; the Details panel follows the selection |
+| `Enter` (Accounts & QOS) | Probe with that account/QOS |
+| `a` | Probe with the next account/QOS |
+| `e` | Edit the probe request: CPUs, memory, walltimes, extra options such as `--partition` or `--constraint` |
+| `m` | Switch between `sbatch` and `srun` probes |
+| `c` | Copy the selected estimate's command |
+| `n` | Toggle Partitions and Nodes by hardware |
+| `p` / `r` | Re-probe / refresh everything now |
+| `l` | Log in to a remote cluster again (ssh asks for any password or MFA) |
+| `?`, `Ctrl+P` | Key help, command palette (themes) |
+| `q` | Quit |
 
-Killarney and Tamia route jobs by duration, so their tables include `Time` and
-`Partition` columns to show where each request would land.
+## Reading the dashboard
 
-## Reading an `rcl` report
+- **Partitions**: `Use` says whether your accounts, QOS and Unix groups may submit
+  there. `Load` is the share of GPUs (CPUs on CPU-only partitions) in use: `█`
+  allocated, `▒` unavailable (down, drained, reserved), `░` free. `Free` is free/total
+  per GPU type, `Idle` counts wholly idle nodes, `Pend` counts pending jobs from all
+  users, and `Max` is the time limit. Details add memory, `AllowAccounts`/`AllowQos`,
+  the partition QOS and priority tier.
+- **Accounts & QOS**: every account/QOS pair you can submit under; `*` marks what
+  commands leave out because Slurm picks it anyway: the account when it is your only
+  one (with several, commands always name it, since sites such as Fir require that
+  for GPU jobs) and the account's default QOS. `Jobs` is your running jobs over the tightest per-user
+  cap, `GPUs` and `Wall` are the tightest GPU and wall-time caps from any scope, and
+  `FS` is your fair-share factor. Details list every cap with its usage: QOS per user,
+  per account, per job and per node, plus association limits on you and your account.
+  `∞` means no cap, `?` unknown.
+- **Start estimates**: rows are request sizes (each GPU type up to the tightest GPU cap,
+  then CPU only), columns are walltimes. Each cell is how long until the scheduler
+  expects the job to start: `now`, a wait such as `0-10:54:00`, `no` when it cannot run
+  (Details gives the reason), or `-` above the account/QOS wall-time cap. The earliest
+  start in each row is underlined. Here a 1-day L40S job starts sooner than a 3-hour
+  one, because short jobs queue in the busier `b1` partition.
+- **Details** for an estimate shows the partition it would land in and the exact
+  command. Drop `--test-only` to submit it: `sbatch` holds the allocation with
+  `sleep infinity` until the time limit; open a shell in it with
+  `srun --jobid=<id> --overlap --pty $SHELL` and release it with `scancel <id>`.
+  `--account`/`--qos` are left out when Slurm would pick them anyway.
+- **My jobs** lists your queued and running jobs, with the scheduler's expected start
+  and reason for pending ones.
 
+## Other clusters
+
+Nothing is hardcoded per cluster: partitions, GPU types, time tiers, accounts and
+limits are read from Slurm. A profile records only what Slurm cannot report, in
+[`clusters.toml`](clusters.toml) at the repository root, keyed by the cluster name. It
+covers `rcl` (one 1-hour walltime, since it routes by GPU request, and its
+storage-policy banner), `fir` (reached over ssh; its memory-unit note) and `tamia`
+(reached over ssh; whole-node GPU requests, a 1-day cap, `srun` needing a program). To
+add a cluster, or a tab for one you are not logged in to, add a table there:
+
+```toml
+[clusters.mycluster]          # the ClusterName from `scontrol show config`
+walltimes = ["0-03:00:00", "1-00:00:00"]
+gpu_counts = "all"            # "pow2" (1, 2, 4, ... default), "all" or "whole_node"
+srun_program = ["bash"]       # if srun probes fail with "No partition specified"
+message_noise = ['NOTE: .*?\.']   # regexes stripped from rejection reasons
+ssh = "login.mycluster.org"   # a tab for it from anywhere; host or ~/.ssh/config alias
 ```
-224 CPUs / 2011 GB / 4x nvidia_b200 / 8x nvidia_b200_2g.45gb / 4x nvidia_b200_3g.90gb (1/1):
-States: MIXED=1
-Resource            | Total | Allocated | Available
----------------------------------------------------
-CPU (cores)         | 224   | 132       | 92
-Memory (GB)         | 2011  | 848       | 1163
-nvidia_b200         | 4     | 2         | 2
-nvidia_b200_2g.45gb | 8     | 6         | 2
-nvidia_b200_3g.90gb | 4     | 3         | 1
 
-Account limits (account=guests, QOS=limited):
-Limit                        | Value    | In use
-------------------------------------------------
-Jobs running                 | 1        | 0
-Jobs submitted               | no limit | 0
-CPUs per job                 | 8        | -
-Memory per job (GB)          | 64       | -
-GPUs per job                 | 1        | -
-nvidia_b200 per job          | 1        | -
-nvidia_b200_2g.45gb per job  | 1        | -
-nvidia_b200_3g.90gb per job  | 1        | -
-GPUs per user                | 1        | 0
-nvidia_b200 per user         | 1        | 0
-nvidia_b200_2g.45gb per user | 1        | 0
-nvidia_b200_3g.90gb per user | 1        | 0
+### When `sacctmgr` fails
 
-Job feasibility (account=guests, QOS=limited):
-Runnable: 6/8
-Request               | Can run | Estimated start     | Run command
---------------------------------------------------------------------------------------------------------------------------------------------------------------
-nvidia_b200:1         | no      | -                   | sbatch --test-only --gres=gpu:nvidia_b200:1 -c4 --mem=32G -t0-01:00:00 --wrap="sleep infinity"
-nvidia_b200_2g.45gb:1 | yes     | 2026-10-01T14:40:30 | sbatch --test-only --gres=gpu:nvidia_b200_2g.45gb:1 -c4 --mem=32G -t0-01:00:00 --wrap="sleep infinity"
-nvidia_b200_3g.90gb:1 | yes     | 2026-10-01T14:40:30 | sbatch --test-only --gres=gpu:nvidia_b200_3g.90gb:1 -c4 --mem=32G -t0-01:00:00 --wrap="sleep infinity"
-cpu                   | yes     | 2026-09-28T14:40:30 | sbatch --test-only -c4 --mem=32G -t0-01:00:00 --wrap="sleep infinity"
-nvidia_b200:1         | no      | -                   | srun --test-only --gres=gpu:nvidia_b200:1 -c4 --mem=32G -t0-01:00:00 --pty zsh
-nvidia_b200_2g.45gb:1 | yes     | 2026-10-01T14:40:30 | srun --test-only --gres=gpu:nvidia_b200_2g.45gb:1 -c4 --mem=32G -t0-01:00:00 --pty zsh
-nvidia_b200_3g.90gb:1 | yes     | 2026-10-01T14:40:30 | srun --test-only --gres=gpu:nvidia_b200_3g.90gb:1 -c4 --mem=32G -t0-01:00:00 --pty zsh
-cpu                   | yes     | 2026-09-28T14:40:30 | srun --test-only -c4 --mem=32G -t0-01:00:00 --pty zsh
-
-Blocked requests:
-  sbatch nvidia_b200:1 for 0-01:00:00: Limited account 'you': GPUs - only a MIG slice is allowed ...
-  srun nvidia_b200:1 for 0-01:00:00: Limited account 'you': GPUs - only a MIG slice is allowed ...
-
-Run command: drop --test-only to submit; sbatch then holds the allocation with 'sleep infinity' until the time limit, and srun opens a Zsh shell.
-Open a shell in an sbatch allocation with 'srun --jobid=<jobid> --overlap --pty zsh'; release it with 'scancel <jobid>'.
-```
-
-- **Resource tables** show the whole node, including capacity your account cannot
-  request. CPUs are the effective count after reserved cores.
-- **Account limits** come from your QOS: running and submitted jobs per user, and
-  CPU/memory/GPU caps per job and per user, with your current usage under `In use`.
-  `no limit` means the QOS sets no cap; `?` means the value could not be read.
-- **Job feasibility** follows each limits table. It probes 1 up to N of each GPU type,
-  where N is the QOS's tightest GPU cap (never more than one node holds), plus a
-  CPU-only request.
-- **Run command** is the exact probe. Remove `--test-only` to run it. `-c` and `-t`
-  are short for `--cpus-per-task` and `--time`. `--account` and `--qos` are left out
-  when Slurm would pick them anyway (your default account, or the account's only
-  QOS), as for `guests`/`limited` above.
-- **Blocked requests** gives the scheduler's reason for each rejection, which is how
-  site rules such as MIG-slice-only access show up.
-
-## When `sacctmgr` fails
-
-On some login nodes `sacctmgr` fails with "Connection refused" because `slurmdbd`
-runs on the controller. Accounting is still enforced: `node_state` reads limits
-from `scontrol show assoc_mgr` instead. Without `sacctmgr` it cannot list your QOS
-assignments, so `rcl` test-submits each cached account/QOS pair and hides the ones
-Slurm rejects, while `killarney` falls back to the QOSs cached for your accounts,
-which may be incomplete.
+On some login nodes `sacctmgr` fails with "Connection refused" because `slurmdbd` runs
+on the controller. Accounting is still enforced: `node_state` reads limits from
+`scontrol show assoc_mgr` instead. Without `sacctmgr` it cannot list your QOS
+assignments, so it test-submits each cached account/QOS pair and hides the ones Slurm
+rejects.
 
 ## Development
 
 ```bash
 uv sync
 uv run python -m unittest discover -s tests -t tests
+uvx ruff check src tests
 ```
 
 See [AGENTS.md](AGENTS.md) for the code layout and site-specific Slurm quirks.

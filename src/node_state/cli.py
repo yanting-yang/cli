@@ -1,51 +1,91 @@
+"""Entry point for `node_state`: the dashboard, or a one-shot text report."""
+
 import argparse
+import sys
+from concurrent.futures import ThreadPoolExecutor
 
-from .clusters import fallback, killarney, rcl, tamia, vulcan
+from . import hosts, probes, profiles, report, slurm, snapshot
 
-CLUSTER_RUNNERS = {
-    "killarney": killarney.main,
-    "rcl": rcl.main,
-    "tamia": tamia.main,
-    "vulcan": vulcan.main,
-}
 
-# Clusters whose reporters run the resizable feasibility probes.
-PROBE_CLUSTERS = ("killarney", "rcl", "tamia")
+def find_clusters():
+    """This cluster, if Slurm runs here, then each cluster with an ssh host.
+
+    The local cluster is detected from `scontrol show config`; a configured
+    remote with the same name is skipped, since it is already shown.
+    """
+    local = hosts.Local()
+    config = local.run(slurm.CONFIG_COMMAND)
+    clusters = []
+    local_name = None
+    if config is not None:
+        local_name = slurm.parse_config(config).get("ClusterName") or None
+        profile = profiles.load_profile(local_name or "")
+        clusters.append(snapshot.Cluster(local_name or "local", profile, local))
+    for profile in profiles.remote_profiles():
+        if profile.name != local_name:
+            remote = hosts.Remote(profile.ssh)
+            clusters.append(snapshot.Cluster(profile.name, profile, remote))
+    return clusters
+
+
+def connect(clusters):
+    """Make sure every remote cluster answers ssh without prompting.
+
+    Connections are checked in parallel. When one needs a password or MFA and
+    there is a terminal, ssh asks for it here, before the dashboard starts;
+    the control master it opens is reused for every later command.
+    """
+    remotes = [cluster for cluster in clusters if cluster.host.ssh]
+    if not remotes:
+        return
+    with ThreadPoolExecutor(len(remotes)) as pool:
+        errors = list(pool.map(lambda cluster: cluster.host.check(), remotes))
+    for cluster, error in zip(remotes, errors):
+        if error is None or not sys.stdin.isatty():
+            continue
+        print(
+            f"node_state: connecting to {cluster.name} ({cluster.host.ssh}); "
+            "ssh may ask for your password or MFA.",
+            file=sys.stderr,
+        )
+        if not cluster.host.login():
+            print(f"node_state: could not connect to {cluster.name}.", file=sys.stderr)
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser()
-    cluster_names = sorted(CLUSTER_RUNNERS)
-    subparsers = parser.add_subparsers(dest="cluster")
-    cluster_parsers = {
-        cluster_name: subparsers.add_parser(cluster_name)
-        for cluster_name in cluster_names
-    }
+    # No options: clusters are detected and configured in clusters.toml, and
+    # the probe request is edited in the dashboard. Parsing still rejects
+    # stray arguments and serves --help.
+    argparse.ArgumentParser(
+        prog="node_state",
+        description=(
+            "Partitions, account/QOS limits and estimated start times for the "
+            "Slurm cluster you are logged in to, and for the clusters with an "
+            "ssh host in clusters.toml. Prints a text report when output is "
+            "not a terminal."
+        ),
+    ).parse_args(argv)
 
-    for cluster_name in PROBE_CLUSTERS:
-        probe_parser = cluster_parsers[cluster_name]
-        probe_parser.add_argument(
-            "-c",
-            dest="cpus_per_task",
-            type=int,
-            default=4,
-            metavar="4",
-            help="CPUs per task for each probe",
+    try:
+        clusters = find_clusters()
+    except ValueError as error:
+        sys.exit(f"node_state: clusters.toml: {error}")
+    if not clusters:
+        sys.exit(
+            "node_state: Slurm is not available here ('scontrol' failed), and no "
+            "cluster in clusters.toml has an ssh host."
         )
-        probe_parser.add_argument(
-            "--mem",
-            default="32G",
-            metavar="32G",
-        )
-        probe_parser.add_argument(
-            "--sort-by-start",
-            action="store_true",
-        )
+    connect(clusters)
+    settings = probes.Settings()
 
-    args = parser.parse_args(argv)
+    if not sys.stdout.isatty():
+        report.print_reports(clusters, settings)
+        return
 
-    runner = fallback.main if args.cluster is None else CLUSTER_RUNNERS[args.cluster]
-    runner(args)
+    # Textual is only imported for the dashboard, keeping the report fast.
+    from .tui import NodeStateApp
+
+    NodeStateApp(clusters, settings).run()
 
 
 if __name__ == "__main__":

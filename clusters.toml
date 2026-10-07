@@ -1,0 +1,39 @@
+# Per-cluster settings for node_state, keyed by ClusterName from
+# `scontrol show config`.
+#
+# Most clusters need no entry: hardware, partitions, time tiers, accounts and
+# limits are all read from Slurm. Add one only for rules Slurm cannot report.
+#
+#   walltimes      Walltimes to probe, as D-HH:MM:SS. Default: one per
+#                  partition time limit, which is where routing tiers change.
+#   gpu_counts     GPU counts to probe per type: "pow2" (1, 2, 4, ...; default),
+#                  "all", or "whole_node" for sites that reject partial nodes.
+#   srun_program   Program for srun probes, for submit filters that only route
+#                  an srun naming one ("No partition specified" otherwise).
+#   message_noise  Regexes stripped from rejection reasons. Colour codes,
+#                  "sbatch:"/"srun:" prefixes and ----/==== rules always are.
+#   ssh            A login node to reach this cluster from elsewhere: a host
+#                  name or ~/.ssh/config alias. Every cluster with one gets a
+#                  tab; ssh asks for any password/MFA once, then the
+#                  connection is reused (ControlMaster).
+#
+# src/node_state/clusters.toml links here, so this file ships in the package.
+
+# RCL routes jobs by GPU request rather than walltime, so one time is enough.
+[clusters.rcl]
+walltimes = ["0-01:00:00"]
+message_noise = ['STORAGE POLICY: .*? after you are done with your work\.']
+
+# Fir's submit filter adds a note about G vs 1000M memory units to replies.
+[clusters.fir]
+ssh = "fir.alliancecan.ca"
+message_noise = ['NOTE: Your memory request .*? not 1000M\.\s*']
+
+# Tamia allocates GPUs only by whole node, its submit filter rejects anything
+# over a day, and srun must name a program to be routed.
+[clusters.tamia]
+ssh = "tamia.alliancecan.ca"
+walltimes = ["0-03:00:00", "0-12:00:00", "1-00:00:00"]
+gpu_counts = "whole_node"
+srun_program = ["bash"]
+message_noise = ['NOTE: Your memory request .*? not 1000M\.\s*']
