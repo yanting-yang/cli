@@ -96,6 +96,23 @@ class MainTests(unittest.TestCase):
         self.connect.assert_called_once_with(self.clusters)
         self.print_reports.assert_called_once_with(self.clusters, probes.Settings())
 
+    def test_reports_only_this_cluster_when_there_is_one(self):
+        remote = snapshot.Cluster("fir", profiles.Profile("fir"), Mock(ssh="fir"))
+        self.find_clusters.return_value = [*self.clusters, remote]
+        with patch.object(cli.sys.stdout, "isatty", return_value=False):
+            cli.main([])
+
+        self.print_reports.assert_called_once_with(self.clusters, probes.Settings())
+
+    def test_reports_remote_clusters_where_slurm_is_missing(self):
+        remote = snapshot.Cluster("fir", profiles.Profile("fir"), Mock(ssh="fir"))
+        self.find_clusters.return_value = [remote]
+        with patch.object(cli.sys.stdout, "isatty", return_value=False):
+            cli.main([])
+
+        self.connect.assert_called_once_with([remote])
+        self.print_reports.assert_called_once_with([remote], probes.Settings())
+
     def test_opens_the_dashboard_on_a_terminal(self):
         app = Mock()
         with (
@@ -105,6 +122,8 @@ class MainTests(unittest.TestCase):
             cli.main([])
 
         self.print_reports.assert_not_called()
+        # Remote clusters are contacted when their tab opens, not up front.
+        self.connect.assert_not_called()
         app_class.assert_called_once_with(self.clusters, probes.Settings())
         app.run.assert_called_once_with()
 

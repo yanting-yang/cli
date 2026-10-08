@@ -44,13 +44,14 @@ uvx --from git+https://github.com/yanting-yang/cli node_state
 
 # From a checkout
 uv run node_state                # one tab per cluster: this one, then remote ones
-uv run node_state > report.txt   # text report of every cluster when not a terminal
+uv run node_state > report.txt   # text report of this cluster when not a terminal
 ```
 
 There are no options. The first tab is the cluster you are logged in to (from
-`ClusterName` in `scontrol show config`); every cluster with an `ssh` host in
-[`clusters.toml`](clusters.toml) (Fir and Tamia here) gets a tab of its own, read over
-ssh. Every probe starts as 4 CPUs and 32 GB at each partition time limit with
+`ClusterName` in `scontrol show config`), and it is the only one checked at startup.
+Every cluster with an `ssh` host in [`clusters.toml`](clusters.toml) (Fir and Tamia
+here) gets a tab too, but is only contacted, over ssh, once you open its tab (click it,
+or `]`/`[`). Every probe starts as 4 CPUs and 32 GB at each partition time limit with
 `sbatch`; change a tab's request with `e` (CPUs, memory, walltimes, extra `sbatch`
 options) and `m` (`sbatch`/`srun`). The visible tab refreshes every minute and
 re-probes every five.
@@ -62,12 +63,16 @@ job, `srun` probes fail with "Requested operation is presently disabled".
 ### Remote clusters
 
 Remote tabs run Slurm on the cluster's login node through `ssh`, with your
-`~/.ssh/config` (aliases, users, keys). Before the dashboard opens, `node_state` checks
-each remote and, if ssh needs a password or MFA, asks for it in the terminal once. It
-reuses an ssh control master for every later command: yours if your config sets
-`ControlMaster`, otherwise its own, which closes 10 minutes after the last use. If a
-connection drops, the tab says why; press `l` to log in again without leaving the
-dashboard.
+`~/.ssh/config` (aliases, users, keys). Nothing is sent to a remote cluster until you
+open its tab, and only the visible tab refreshes. When you open one and ssh needs a
+password or MFA, the dashboard steps aside so ssh can ask in the terminal, then comes
+back. It reuses an ssh control master for every later command: yours if your config
+sets `ControlMaster`, otherwise its own, which closes 10 minutes after the last use (so
+a tab left unopened that long may ask again). If a connection drops later, the tab says
+why; press `l` to log in again.
+
+The text report printed when output is not a terminal covers the cluster you are on;
+it covers the remote ones only where Slurm is not available.
 
 Each refresh of a remote tab is one ssh session, and the cache of limits is fetched
 only for your accounts and QOS, because login nodes can take seconds to start a

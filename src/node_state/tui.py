@@ -1,9 +1,10 @@
 """Interactive dashboard: partitions, account/QOS limits, start estimates, jobs.
 
-Each cluster gets a tab holding a `ClusterView`. A view collects its cluster's
-data on a background thread (the visible one every `REFRESH_SECONDS`), and
-probes run on their own worker, filling the estimates grid cell by cell as
-replies arrive. Remote clusters are reached over ssh (see `hosts`).
+Each cluster gets a tab holding a `ClusterView`. A cluster is contacted only
+while its tab is shown: at startup that is the local one, and a remote cluster
+is first reached over ssh (see `hosts`) when its tab is opened. The visible
+view collects data on a background thread every `REFRESH_SECONDS`, and probes
+run on their own worker, filling the estimates grid as replies arrive.
 """
 
 import dataclasses
@@ -34,9 +35,6 @@ from . import hosts, probes, slurm, snapshot, views
 from .profiles import Profile
 
 REFRESH_SECONDS = 60
-# Hidden tabs refresh this often, without probing: their data stays recent and
-# their ssh control masters (which close after 10 idle minutes) stay open.
-BACKGROUND_REFRESH_SECONDS = 300
 # A tab shown again refreshes once its data is this old.
 STALE_AFTER = datetime.timedelta(seconds=REFRESH_SECONDS)
 # Re-probe on a refresh once the estimates are this old.
@@ -175,6 +173,9 @@ class ClusterView(Vertical):
         self.probed_at = None
         self.error = None
         self.detail_from = "partitions"
+        # Set when the tab is opened: if that first refresh cannot connect,
+        # ssh gets the terminal to ask for a password or MFA.
+        self.login_on_failure = False
 
     # --- Layout --------------------------------------------------------------
 
@@ -228,15 +229,39 @@ class ClusterView(Vertical):
             "Account", "QOS", "Jobs", "GPUs", "Wall", "FS"
         )
         self.tables["jobs"].add_columns("Job", "Name", "St", "Time", "Start / where")
-        for table in self.tables.values():
-            table.loading = True
-        self.refresh_snapshot()
+        # Nothing is fetched until the tab is opened (`activate`).
+        if self.host.ssh:
+            self.status.update("not checked yet")
+            self.detail.update(
+                Text(
+                    f"{self.cluster.name} is checked over ssh ({self.host.ssh}) "
+                    "when you open this tab.",
+                    style="dim",
+                )
+            )
+
+    def activate(self):
+        """The tab was opened: fetch what is missing or old, then take focus."""
+        # The pane is shown on the next refresh; a hidden table cannot take focus.
+        self.app.call_after_refresh(self.focus_main)
+        if self.stale or self.error is not None:
+            self.login_on_failure = bool(self.host.ssh)
+            self.refresh_snapshot()
+        elif self.probes_stale:
+            self.start_probes()
 
     def focus_main(self):
         """Focus the panel the details pane follows."""
         table = self.tables.get(self.detail_from)
         if table is not None and table.display:
             table.focus()
+
+    def loaded(self):
+        """Clear the loading state; tables that were loading could not take focus."""
+        for table in self.tables.values():
+            table.loading = False
+        if self.app.view is self and not self.has_focus_within:
+            self.focus_main()
 
     # --- Data ----------------------------------------------------------------
 
@@ -252,22 +277,24 @@ class ClusterView(Vertical):
             datetime.datetime.now() - self.probed_at > PROBE_MAX_AGE
         )
 
-    def refresh_snapshot(self, probe=True):
-        """Collect in the background, unless a collection is still running.
-
-        With `probe`, stale estimates are probed again once the data lands.
-        """
+    def refresh_snapshot(self):
+        """Collect in the background, unless a collection is still running."""
         busy = any(
             worker.node is self
             and worker.group == "snapshot"
             and not worker.is_finished
             for worker in self.app.workers
         )
-        if not busy:
-            self.collect(probe)
+        if busy:
+            return
+        if self.snap is None:
+            self.status.update("loading…")
+            for table in self.tables.values():
+                table.loading = True
+        self.collect()
 
     @work(thread=True, group="snapshot")
-    def collect(self, probe=True):
+    def collect(self):
         try:
             if self.collector is None:
                 info = snapshot.ClusterInfo.detect(self.host)
@@ -284,36 +311,41 @@ class ClusterView(Vertical):
                 severity="error",
             )
             return
-        self.app.call_from_thread(self.apply_snapshot, snap, probe)
+        self.app.call_from_thread(self.apply_snapshot, snap)
 
     def detected(self, info):
         self.info = info
         self.query_one("#identity", Static).update(self.identity())
 
     def disconnected(self, message):
-        """Show why ssh failed; the last data, if any, stays on screen."""
+        """Show why ssh failed; the last data, if any, stays on screen.
+
+        Right after the tab is opened, ssh then gets the terminal to log in.
+        """
         self.error = message
-        for table in self.tables.values():
-            table.loading = False
+        self.loaded()
         self.update_status()
         self.show_detail()
+        if self.login_on_failure:
+            self.login_on_failure = False
+            self.call_after_refresh(self.action_login)
 
-    def apply_snapshot(self, snap, probe=True):
+    def apply_snapshot(self, snap):
         first = self.snap is None
         self.snap = snap
         self.error = None
-        for table in self.tables.values():
-            table.loading = False
+        self.login_on_failure = False
         self.fill_partitions()
         self.fill_hardware()
         self.fill_jobs()
         if self.scope not in snap.scopes:
             self.scope = snap.preferred_scope()
         self.fill_scopes()
-        if probe and self.probes_stale:
+        if self.probes_stale:
             self.start_probes()
         elif self.grid is not None:
             self.fill_estimates()
+        self.loaded()
         if first:
             for note in snap.notes:
                 self.notify(
@@ -907,9 +939,8 @@ class NodeStateApp(App):
         self.tabs = self.query_one(TabbedContent)
         self.views = list(self.query(ClusterView))
         self.set_interval(REFRESH_SECONDS, self.refresh_visible)
-        self.set_interval(BACKGROUND_REFRESH_SECONDS, self.refresh_hidden)
         self.set_interval(1, self.update_status)
-        self.call_after_refresh(self.view.focus_main)
+        self.view.activate()
 
     @property
     def view(self):
@@ -918,29 +949,21 @@ class NodeStateApp(App):
         return self.views[int(active.removeprefix("cluster-"))]
 
     def refresh_visible(self):
-        """The visible cluster refreshes every minute, probing when stale."""
-        self.view.refresh_snapshot()
+        """Only the visible cluster refreshes, probing when its estimates are old.
 
-    def refresh_hidden(self):
-        """Hidden clusters refresh now and then, without probing."""
-        for view in self.views:
-            if view is not self.view and view.error is None:
-                view.refresh_snapshot(probe=False)
+        Hidden tabs are left alone; opening one refreshes it if needed.
+        """
+        if self.view.snap is not None:
+            self.view.refresh_snapshot()
 
     def update_status(self):
         self.view.update_status()
 
     @on(TabbedContent.TabActivated)
     def tab_activated(self, event):
-        view = self.view
-        # The pane is shown on the next refresh; a hidden table cannot take focus.
-        self.call_after_refresh(view.focus_main)
-        if view.error is not None:
-            return
-        if view.stale:
-            view.refresh_snapshot()
-        elif view.probes_stale and view.snap is not None:
-            view.start_probes()
+        # The first tab is activated in on_mount, once the views are known.
+        if getattr(self, "views", None):
+            self.view.activate()
 
     def check_action(self, action, parameters):
         """While the request dialog is open, only quitting reaches the dashboard."""

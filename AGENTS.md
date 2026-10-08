@@ -6,12 +6,12 @@ A Python CLI (project name `cli`) with utilities for inspecting a Slurm cluster.
 
 Current commands:
 
-- `node_state` — a [Textual](https://textual.textualize.io/) dashboard in the style of `htop`/`slurmtop`: partitions, the caller's account/QOS limits, a grid of estimated start times from `--test-only` probes, and the caller's jobs. One tab per cluster: the local one (if Slurm runs here), then each `clusters.toml` entry with an `ssh` host, read over ssh. When output is not a terminal it prints the same panels once instead. It takes no options: the cluster is detected from `scontrol`, and the probe request is edited in the dashboard. It works on any cluster: everything comes from Slurm, and the few site rules Slurm cannot report live in data profiles.
+- `node_state` — a [Textual](https://textual.textualize.io/) dashboard in the style of `htop`/`slurmtop`: partitions, the caller's account/QOS limits, a grid of estimated start times from `--test-only` probes, and the caller's jobs. One tab per cluster: the local one (if Slurm runs here), then each `clusters.toml` entry with an `ssh` host, read over ssh. Only the local cluster is checked at startup; a remote one is first contacted when its tab is opened (`ClusterView.activate`), and only the visible tab refreshes. When output is not a terminal it prints the same panels once instead. It takes no options: the cluster is detected from `scontrol`, and the probe request is edited in the dashboard. It works on any cluster: everything comes from Slurm, and the few site rules Slurm cannot report live in data profiles.
 
 ## Layout
 
 - [pyproject.toml](pyproject.toml) — project metadata; console scripts live under `[project.scripts]`
-- [src/node_state/cli.py](src/node_state/cli.py) — entry point (no options besides `--help`); lists the clusters (`find_clusters`), checks/logs in to remote ones before the dashboard (`connect`), then runs the dashboard or, when output is not a terminal, the text report
+- [src/node_state/cli.py](src/node_state/cli.py) — entry point (no options besides `--help`); lists the clusters (`find_clusters`), then runs the dashboard or, when output is not a terminal, the text report of the local cluster (remote ones, after `connect`, only when Slurm is not available here)
 - [src/node_state/hosts.py](src/node_state/hosts.py) — where commands run: `Local` (subprocess) or `Remote` (ssh). `run_batch` runs a refresh's commands in parallel, in one ssh session for a remote; `run_stream` reports probe results as they land, over a few ssh sessions
 - [src/node_state/slurm.py](src/node_state/slurm.py) — the `scontrol`/`squeue`/`sacctmgr`/`sbatch`/`srun` command lines (`*_COMMAND`, `*_command`, `test_command`) and the pure parsers for their output
 - [clusters.toml](clusters.toml) — the per-cluster profiles, as data; `src/node_state/clusters.toml` is a symlink to it so the build copies it into the package (keep the link: without it an installed copy has no profiles)
@@ -28,7 +28,7 @@ Current commands:
 ```bash
 uv sync                          # install/refresh the environment
 uv run node_state                # dashboard for the cluster you are on
-uv run node_state | less         # one-shot text report of every cluster
+uv run node_state | less         # one-shot text report of this cluster
 uv run python -m unittest discover -s tests -t tests   # run the tests
 ```
 
@@ -39,7 +39,7 @@ Note the `-t tests` on the test command: `tests/` has no `__init__.py`, so disco
 - Python 3.12 only (`requires-python = "==3.12.*"`), managed with `uv`; build backend is `uv_build`. Textual is the only runtime dependency, and `cli.py` imports it only for the dashboard.
 - Command names use underscores (`node_state`), not hyphens.
 - Lint with `uvx ruff check src tests`.
-- Nothing outside `hosts.py` starts a process; everything else receives a host and calls `run`/`run_batch`/`run_stream`. Commands never read the terminal (`stdin=DEVNULL`, `ssh -T`), or ssh would steal the dashboard's keystrokes; only `Remote.login` is interactive, run before the dashboard starts or under `App.suspend()`.
+- Nothing outside `hosts.py` starts a process; everything else receives a host and calls `run`/`run_batch`/`run_stream`. Commands never read the terminal (`stdin=DEVNULL`, `ssh -T`), or ssh would steal the dashboard's keystrokes; only `Remote.login` is interactive: under `App.suspend()` when an opened remote tab cannot connect (automatically once per opening, then with `l`), or before a text report.
 - Every duration a panel shows (time limits, wall caps, walltime columns, waits, job times) is Slurm's `D-HH:MM:SS`, via `slurm.format_duration` (minutes) or `slurm.normalize_time` (squeue strings). `∞` marks no limit.
 
 ### Supporting a new cluster
@@ -81,7 +81,7 @@ These quirks of the `assoc_mgr` output shape the parsers in [slurm.py](src/node_
 
 ### Remote clusters
 
-Measured on Alliance login nodes: starting an ssh session costs ~0.15 s on Fir but ~2.5 s on Tamia (shell start-up), while each Slurm command inside a session is fast. Hence one session per refresh (`run_batch`), probes streamed over `PROBE_WORKERS` sessions (`run_stream`), and `ClusterInfo.detect` doing everything in one session with `login_path=True`: non-login ssh sessions on Fir lack Slurm on `PATH`, so detection reads the login shell's PATH (`bash -lc`) and later scripts export it. The unfiltered `assoc_mgr` cache on Fir is 66 MB (8 s); `Collector` filters it to the caller's accounts and QOS (`assoc_mgr_command`), fetching parent accounts' associations separately (`with_parent_associations`, inserted before `QOS Records`). Only the visible tab refreshes on the timer.
+Measured on Alliance login nodes: starting an ssh session costs ~0.15 s on Fir but ~2.5 s on Tamia (shell start-up), while each Slurm command inside a session is fast. Hence one session per refresh (`run_batch`), probes streamed over `PROBE_WORKERS` sessions (`run_stream`), and `ClusterInfo.detect` doing everything in one session with `login_path=True`: non-login ssh sessions on Fir lack Slurm on `PATH`, so detection reads the login shell's PATH (`bash -lc`) and later scripts export it. The unfiltered `assoc_mgr` cache on Fir is 66 MB (8 s); `Collector` filters it to the caller's accounts and QOS (`assoc_mgr_command`), fetching parent accounts' associations separately (`with_parent_associations`, inserted before `QOS Records`). Only the visible tab refreshes on the timer; hidden tabs are not contacted at all, so a remote control master can expire while its tab is hidden, and reopening it then logs in again.
 
 When the user's `~/.ssh/config` already multiplexes (`ControlMaster`/`ControlPath`, read with `ssh -G`), `Remote` reuses that master, so a login made in another terminal counts. Otherwise it adds its own socket in `$TMPDIR/node_state-<uid>/` with `ControlPersist=10m`.
 

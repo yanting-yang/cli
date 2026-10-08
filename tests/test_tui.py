@@ -37,8 +37,14 @@ class TuiTestCase(unittest.IsolatedAsyncioTestCase):
     """A dashboard with this cluster ("here") and a remote one ("fir")."""
 
     async def asyncSetUp(self):
+        self.contacted = []
+
+        def contact(host):
+            self.contacted.append(host.ssh)
+            return detect(host)
+
         for target, name, kwargs in [
-            (snapshot.ClusterInfo, "detect", {"side_effect": detect}),
+            (snapshot.ClusterInfo, "detect", {"side_effect": contact}),
             (snapshot, "Collector", {"side_effect": FakeCollector}),
         ]:
             patcher = patch.object(target, name, **kwargs)
@@ -243,63 +249,78 @@ class ClusterTabTests(TuiTestCase):
             await pilot.press("left_square_bracket")
             self.assertEqual(self.view.cluster.name, "here")
 
-    async def test_explains_an_unreachable_cluster_and_offers_a_login(self):
-        self.fir.lost = "Permission denied (keyboard-interactive)."
+    async def test_contacts_a_remote_cluster_only_when_its_tab_opens(self):
         async with self.app.run_test(size=(150, 44)) as pilot:
             await self.settle(pilot)
+            fir = self.app.views[1]
+            self.assertEqual(self.contacted, [None])
+            self.assertIsNone(fir.snap)
+            self.assertEqual(str(fir.status.content), "not checked yet")
+            self.assertIn("checked over ssh (fir.example.org)", str(fir.detail.content))
+
+            self.app.refresh_visible()
+            await self.settle(pilot)
+            self.assertEqual(self.contacted, [None])
+
             await pilot.press("right_square_bracket")
             await self.settle(pilot)
+            self.assertEqual(self.contacted, [None, "fir.example.org"])
 
-            self.assertIn("Cannot reach fir over ssh", self.detail())
-            self.assertIn("Permission denied", self.detail())
-            self.assertIn("not connected", str(self.view.status.content))
-            self.assertTrue(self.view.check_action("login", ()))
-            self.assertFalse(self.app.views[0].check_action("login", ()))
-
-    async def test_logs_in_through_the_terminal_and_loads(self):
+    async def test_logs_in_when_an_opened_remote_tab_needs_it(self):
         self.fir.lost = "Permission denied."
+        logins = []
 
         def login():
+            logins.append(True)
             self.fir.lost = None
             return True
 
         self.fir.login = login
         async with self.app.run_test(size=(150, 44)) as pilot:
             await self.settle(pilot)
-            await pilot.press("right_square_bracket")
-            await self.settle(pilot)
             with (
                 patch.object(self.app, "suspend", contextlib.nullcontext),
                 contextlib.redirect_stdout(io.StringIO()) as terminal,
             ):
-                await pilot.press("l")
+                await pilot.press("right_square_bracket")
+                await self.settle(pilot)
                 await self.settle(pilot)
 
+            self.assertEqual(logins, [True])
             self.assertIn("logging in to fir", terminal.getvalue())
-
             self.assertIsNone(self.view.error)
             self.assertEqual(self.table("partitions").row_count, 2)
+            self.assertTrue(self.table("partitions").has_focus)
 
-
-class BackgroundRefreshTests(TuiTestCase):
-    async def test_refreshes_hidden_tabs_without_probing(self):
+    async def test_explains_a_failed_login_and_offers_another(self):
+        self.fir.lost = "Permission denied (keyboard-interactive)."
+        logins = []
+        self.fir.login = lambda: logins.append(True) or False
         async with self.app.run_test(size=(150, 44)) as pilot:
             await self.settle(pilot)
-            fir = self.app.views[1]
-            probed = len(self.fir.streamed)
-            fir.probed_at -= tui.PROBE_MAX_AGE * 2
-            fir.snap.taken_at -= tui.STALE_AFTER  # make the old data visibly older
+            with (
+                patch.object(self.app, "suspend", contextlib.nullcontext),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                await pilot.press("right_square_bracket")
+                await self.settle(pilot)
+                await self.settle(pilot)
 
-            self.app.refresh_hidden()
-            await self.settle(pilot)
+                self.assertEqual(logins, [True])
+                self.assertIn("Cannot reach fir over ssh", self.detail())
+                self.assertIn("Permission denied", self.detail())
+                self.assertIn("not connected", str(self.view.status.content))
+                self.assertTrue(self.view.check_action("login", ()))
+                self.assertFalse(self.app.views[0].check_action("login", ()))
 
-            self.assertEqual(len(self.fir.streamed), probed)
-            self.assertIsNotNone(fir.snap)
-
-            # Showing the tab probes again, since its estimates are old.
-            await pilot.press("right_square_bracket")
-            await self.settle(pilot)
-            self.assertEqual(len(self.fir.streamed), probed + 1)
+                # A refresh that fails again does not prompt by itself...
+                self.view.refresh_snapshot()
+                await self.settle(pilot)
+                self.assertEqual(logins, [True])
+                # ...but l does.
+                await pilot.press("l")
+                await self.settle(pilot)
+                self.assertEqual(logins, [True, True])
 
 
 if __name__ == "__main__":

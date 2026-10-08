@@ -29,11 +29,12 @@ def find_clusters():
 
 
 def connect(clusters):
-    """Make sure every remote cluster answers ssh without prompting.
+    """Make sure each remote cluster in a text report answers ssh.
 
     Connections are checked in parallel. When one needs a password or MFA and
-    there is a terminal, ssh asks for it here, before the dashboard starts;
-    the control master it opens is reused for every later command.
+    there is a terminal, ssh asks for it here; the control master it opens is
+    reused for every later command. (The dashboard logs in when a remote tab
+    is opened instead.)
     """
     remotes = [cluster for cluster in clusters if cluster.host.ssh]
     if not remotes:
@@ -60,9 +61,9 @@ def main(argv=None):
         prog="node_state",
         description=(
             "Partitions, account/QOS limits and estimated start times for the "
-            "Slurm cluster you are logged in to, and for the clusters with an "
-            "ssh host in clusters.toml. Prints a text report when output is "
-            "not a terminal."
+            "Slurm cluster you are logged in to; clusters with an ssh host in "
+            "clusters.toml get a tab that connects when opened. Prints a text "
+            "report of this cluster when output is not a terminal."
         ),
     ).parse_args(argv)
 
@@ -75,11 +76,14 @@ def main(argv=None):
             "node_state: Slurm is not available here ('scontrol' failed), and no "
             "cluster in clusters.toml has an ssh host."
         )
-    connect(clusters)
     settings = probes.Settings()
 
     if not sys.stdout.isatty():
-        report.print_reports(clusters, settings)
+        # Like the dashboard at startup, the report covers the cluster this
+        # runs on; remote ones only when Slurm is not available here.
+        reported = [c for c in clusters if c.host.ssh is None] or clusters
+        connect(reported)
+        report.print_reports(reported, settings)
         return
 
     # Textual is only imported for the dashboard, keeping the report fast.
