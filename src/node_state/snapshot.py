@@ -516,6 +516,10 @@ def summarize_partitions(partitions, nodes, pending, scopes, groups):
             {
                 **partition,
                 **resource_usage(members.get(partition["name"], [])),
+                # How many nodes of each hardware kind (`node_hw_key`).
+                "node_kinds": Counter(
+                    node_hw_key(node) for node in members.get(partition["name"], [])
+                ),
                 "pending": None
                 if pending is None
                 else pending.get(partition["name"], 0),

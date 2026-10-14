@@ -85,7 +85,16 @@ class DashboardTests(TuiTestCase):
         async with self.app.run_test(size=(150, 44)) as pilot:
             await self.settle(pilot)
 
-            self.assertEqual(self.table("partitions").row_count, 2)
+            partitions = self.table("partitions")
+            self.assertEqual(partitions.row_count, 2)
+            self.assertEqual(
+                [str(column.label) for column in partitions.columns.values()][:5],
+                ["Partition", "Use", "CPU/node", "Mem/node", "GPU/node"],
+            )
+            self.assertEqual(
+                [str(cell) for cell in partitions.get_row_at(0)[2:5]],
+                ["60", "512G", "4x l40s"],
+            )
             self.assertEqual(self.table("hardware").row_count, 1)
             self.assertEqual(self.table("scopes").row_count, 2)
             self.assertEqual(self.table("jobs").row_count, 1)
@@ -108,6 +117,88 @@ class DashboardTests(TuiTestCase):
             )
             self.assertEqual(str(estimates.get_cell("r3", "w0")), "now")
             self.assertEqual(str(estimates.get_cell("r2", "w0")), "no")
+
+    async def test_lists_jobs_with_start_time_and_nodes(self):
+        base = {
+            "name": "train",
+            "partition": "gpu",
+            "account": "lab",
+            "qos": "normal",
+            "time_limit": "3:00:00",
+            "submit": "2026-10-14T08:00:00",
+            "cpus": "4",
+            "mem": "32G",
+            "nodes": "1",
+            "tres": "gres/gpu:l40s:1",
+        }
+        jobs = [
+            {
+                **base,
+                "id": "101",
+                "state": "RUNNING",
+                "elapsed": "1:02:03",
+                "start": "2026-10-14T08:42:05",
+                "reason": "None",
+                "nodelist": "kn001",
+                "sched_nodes": "(null)",
+                "time_left": "5:37",
+            },
+            {
+                **base,
+                "id": "102",
+                "state": "PENDING",
+                "elapsed": "0:00",
+                "start": "2026-10-15T06:00:00",
+                "reason": "Priority",
+                "nodelist": "",
+                "sched_nodes": "kn134",
+                "time_left": "3:00:00",
+            },
+        ]
+        async with self.app.run_test(size=(150, 44)) as pilot:
+            await self.settle(pilot)
+            self.view.collector.snap.jobs = jobs
+            await pilot.press("r")
+            await self.settle(pilot)
+
+            table = self.table("jobs")
+            self.assertEqual(
+                [str(column.label) for column in table.columns.values()],
+                ["Job", "Name", "St", "Start", "Time", "Left", "Nodes", "Reason"],
+            )
+            self.assertEqual(
+                [str(cell) for cell in table.get_row("101")],
+                [
+                    "101",
+                    "train",
+                    "R",
+                    "10-14 08:42",
+                    "0-01:02:03",
+                    "0-00:05:37",
+                    "kn001",
+                    "-",
+                ],
+            )
+            self.assertEqual(
+                [str(cell) for cell in table.get_row("102")],
+                [
+                    "102",
+                    "train",
+                    "PD",
+                    "10-15 06:00",
+                    "-",
+                    "0-03:00:00",
+                    "kn134",
+                    "Priority",
+                ],
+            )
+
+            await pilot.press("4", "down")
+            await pilot.pause()
+            self.assertIn("starts 2026-10-15 06:00 planned on kn134", self.detail())
+            # Under 10 minutes left stands out; a pending job's limit is dimmed.
+            self.assertEqual(table.get_row("101")[5].style, "bold red")
+            self.assertEqual(table.get_row("102")[5].style, "dim")
 
     async def test_shows_the_run_command_for_the_selected_cell(self):
         async with self.app.run_test(size=(150, 44)) as pilot:
@@ -172,6 +263,81 @@ class DashboardTests(TuiTestCase):
             self.assertNotIsInstance(self.app.screen, tui.RequestScreen)
             self.assertTrue(self.app.check_action("switch_cluster", (1,)))
             self.assertEqual(self.table("estimates").row_count, 4)
+
+    async def test_adds_email_to_commands_and_lets_the_request_drop_it(self):
+        self.app = tui.NodeStateApp(
+            self.app.clusters, probes.Settings(mail_user="me@example.com")
+        )
+        async with self.app.run_test(size=(150, 44)) as pilot:
+            await self.settle(pilot)
+            self.assertIn("--mail-user=me@example.com", self.last_probe())
+            self.assertIn(
+                "email on BEGIN,END,FAIL", self.table("estimates").border_subtitle
+            )
+            await pilot.press("3")
+            await pilot.pause()
+            self.assertIn("--mail-user=me@example.com", self.detail())
+
+            await pilot.press("e")
+            await pilot.pause()
+            mail = self.app.screen.query_one("#mail", Input)
+            self.assertEqual(mail.value, "me@example.com")
+            mail.value = ""
+            await pilot.click("#apply")
+            await self.settle(pilot)
+
+            self.assertIsNone(self.view.settings.mail_user)
+            self.assertNotIn("--mail-user=me@example.com", self.last_probe())
+
+    async def test_moves_through_the_dialog_with_the_keyboard(self):
+        async with self.app.run_test(size=(150, 44)) as pilot:
+            await self.settle(pilot)
+            await pilot.press("e")
+            await pilot.pause()
+            self.assertEqual(self.app.focused.id, "whole-node")
+
+            # Whole node disables CPUs and memory, so Tab skips them.
+            await pilot.press("space", "tab")
+            self.assertEqual(self.app.focused.id, "walltimes")
+            await pilot.press("tab", "tab", "tab", "tab", "enter")
+            await self.settle(pilot)
+
+            self.assertNotIsInstance(self.app.screen, tui.RequestScreen)
+            self.assertTrue(self.view.settings.whole_node)
+
+    async def test_requests_a_whole_node_from_the_dialog(self):
+        async with self.app.run_test(size=(150, 44)) as pilot:
+            await self.settle(pilot)
+            await pilot.press("e")
+            await pilot.pause()
+            await pilot.click("#whole-node")
+            await pilot.pause()
+            self.assertTrue(self.app.screen.query_one("#cpus", Input).disabled)
+            self.assertTrue(self.app.screen.query_one("#mem", Input).disabled)
+            await pilot.click("#apply")
+            await self.settle(pilot)
+
+            self.assertTrue(self.view.settings.whole_node)
+            probe = self.last_probe()
+            self.assertIn("--exclusive", probe)
+            self.assertIn("--mem=0", probe)
+            self.assertFalse(any(arg.startswith("-c") for arg in probe))
+            # Only each GPU type's full node count, then CPU only.
+            self.assertEqual(
+                [request.label for request in self.view.grid.requests],
+                ["4x l40s", "CPU only"],
+            )
+            self.assertIn("whole node", self.table("estimates").border_subtitle)
+
+            # The dialog remembers the choice and can switch it back off.
+            await pilot.press("e")
+            await pilot.pause()
+            self.assertTrue(self.app.screen.query_one("#whole-node").value)
+            await pilot.click("#whole-node")
+            await pilot.click("#apply")
+            await self.settle(pilot)
+            self.assertFalse(self.view.settings.whole_node)
+            self.assertIn("-c4", self.last_probe())
 
     async def test_rejects_an_invalid_request(self):
         async with self.app.run_test(size=(150, 44)) as pilot:

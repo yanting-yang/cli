@@ -16,6 +16,25 @@ from pathlib import Path
 
 from . import probes
 
+# Job states `--mail-type` accepts (sbatch(1)).
+MAIL_TYPES = frozenset(
+    {
+        "NONE",
+        "BEGIN",
+        "END",
+        "FAIL",
+        "REQUEUE",
+        "ALL",
+        "INVALID_DEPEND",
+        "STAGE_OUT",
+        "TIME_LIMIT",
+        "TIME_LIMIT_90",
+        "TIME_LIMIT_80",
+        "TIME_LIMIT_50",
+        "ARRAY_TASKS",
+    }
+)
+
 # A symlink to the repository's clusters.toml, so the build copies the file
 # into the package and installed copies read the same settings as a checkout.
 CONFIG_PATH = Path(__file__).with_name("clusters.toml")
@@ -38,14 +57,42 @@ class Profile:
     ssh: str | None = None
 
 
-def load_profiles(path=CONFIG_PATH):
-    """Read the `[clusters.<name>]` tables, or none if the file is missing."""
+def load_config(path=CONFIG_PATH):
+    """The whole config file as a dict, or {} if it is missing."""
     try:
         with open(path, "rb") as handle:
-            data = tomllib.load(handle)
+            return tomllib.load(handle)
     except FileNotFoundError:
         return {}
-    clusters = data.get("clusters", {})
+
+
+def load_mail(path=CONFIG_PATH):
+    """Return (user, type) from the `[mail]` table, or None without one.
+
+    Every cluster's commands then ask Slurm to email `user` on the job
+    states listed in `type` (default BEGIN,END,FAIL).
+    """
+    mail = load_config(path).get("mail")
+    if mail is None:
+        return None
+    if not isinstance(mail, dict):
+        raise ValueError("[mail] must be a table")
+    unknown = set(mail) - {"user", "type"}
+    if unknown:
+        raise ValueError(f"[mail]: unknown settings {sorted(unknown)}")
+    user = mail.get("user")
+    if not isinstance(user, str) or "@" not in user or " " in user.strip():
+        raise ValueError("[mail]: user must be an email address")
+    kind = str(mail.get("type", "BEGIN,END,FAIL")).upper().replace(" ", "")
+    invalid = set(kind.split(",")) - MAIL_TYPES
+    if invalid:
+        raise ValueError(f"[mail]: unknown type {sorted(invalid)}")
+    return user.strip(), kind
+
+
+def load_profiles(path=CONFIG_PATH):
+    """Read the `[clusters.<name>]` tables, or none if the file is missing."""
+    clusters = load_config(path).get("clusters", {})
     if not isinstance(clusters, dict):
         raise ValueError("[clusters] must be a table")
     return clusters

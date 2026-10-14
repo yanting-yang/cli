@@ -9,6 +9,7 @@ in the account/QOS limits. No probe ever starts a job.
 import dataclasses
 import datetime
 import re
+import shlex
 
 from . import slurm, snapshot
 
@@ -51,6 +52,29 @@ class Settings:
     extra: tuple[str, ...] = ()
     # Overrides the profile's or derived walltimes, in minutes.
     walltimes: tuple[int, ...] = ()
+    # Email for job notifications (`[mail]` in clusters.toml); None for none.
+    mail_user: str | None = None
+    mail_type: str = "BEGIN,END,FAIL"
+    # Ask for whole nodes: every CPU, all memory and every GPU on the node.
+    whole_node: bool = False
+
+    def resource_directives(self):
+        """CPU and memory options: the request's, or a whole node's."""
+        if self.whole_node:
+            # --exclusive gives the job every CPU; --mem=0 all the memory.
+            return ["--exclusive", "--mem=0"]
+        # -c is --cpus-per-task, kept short for copying.
+        return [f"-c{self.cpus}", f"--mem={self.mem}"]
+
+    def describe(self):
+        """The request in one line, e.g. `sbatch -c4 --mem=32G`."""
+        return shlex.join([self.command, *self.resource_directives(), *self.extra])
+
+    def mail_directives(self):
+        """`--mail-type`/`--mail-user`, when notifications are on."""
+        if not self.mail_user:
+            return []
+        return [f"--mail-type={self.mail_type}", f"--mail-user={self.mail_user}"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -94,10 +118,12 @@ class Grid:
             "--test-only",
             *self.scope.directives(),
             *self.requests[row].directives(),
-            # -c/-t are --cpus-per-task/--time, kept short for copying.
-            f"-c{settings.cpus}",
-            f"--mem={settings.mem}",
+            *settings.resource_directives(),
+            # -t is --time, kept short for copying.
             f"-t{slurm.format_duration(self.walltimes[column])}",
+            # Probed too, so the run command stays exactly the probed request;
+            # --test-only never creates a job, so no mail is sent.
+            *settings.mail_directives(),
             *settings.extra,
         ]
 
@@ -231,7 +257,8 @@ def build_grid(snap, scope, settings, profile, info):
         requests=plan_requests(
             capacities,
             max_gpu_counts(capacities, limits),
-            profile.gpu_counts,
+            # A whole node means all of its GPUs, whatever the profile probes.
+            "whole_node" if settings.whole_node else profile.gpu_counts,
             snap.gpu_names,
         ),
         walltimes=plan_walltimes(

@@ -44,7 +44,10 @@ def fake_probe(args):
     if "--gres=gpu:l40s:4" in args:
         return scheduler_reply(error="error: too big.")
     hours = 0 if "-t0-03:00:00" in args else 30
-    return scheduler_reply((NOW + datetime.timedelta(hours=hours)).isoformat())
+    # From the clock (which the report tests pin to NOW), so waits never
+    # depend on the day the tests run.
+    now = datetime.datetime.now().replace(microsecond=0)
+    return scheduler_reply((now + datetime.timedelta(hours=hours)).isoformat())
 
 
 class ReportTests(unittest.TestCase):
@@ -69,6 +72,7 @@ class ReportTests(unittest.TestCase):
         text = self.render(make_snapshot())
 
         self.assertIn("me@login · c · Slurm 25.05", text)
+        self.assertIn("(sbatch -c4 --mem=32G), waits from", text)
         self.assertIn("Note: sacctmgr unavailable", text)
         for heading in (
             "Partitions (* default):",
@@ -81,12 +85,27 @@ class ReportTests(unittest.TestCase):
         ):
             self.assertIn(heading, text)
 
+    def test_says_when_probes_ask_for_whole_nodes(self):
+        info = snapshot.ClusterInfo("c", "25.05", "me", "login", None)
+        output = StringIO()
+        with redirect_stdout(output):
+            report.print_report(
+                info,
+                make_snapshot(),
+                profiles.Profile("c"),
+                probes.Settings(whole_node=True),
+                FakeHost(probe=fake_probe),
+            )
+
+        self.assertIn("(sbatch --exclusive --mem=0, whole node)", output.getvalue())
+
     def test_lists_partition_usage(self):
         text = self.render(make_snapshot())
 
         self.assertRegex(
             text,
-            r"gpu\*\s+\| yes\s+\| \d+%\s+\| 3/8 l40s\s+\| 0/2\s+\| 12\s+\| 0-03:00:00",
+            r"gpu\*\s+\| yes\s+\| 60\s+\| 512G\s+\| 4x l40s\s+\| \d+%\s+\| 3/8 l40s"
+            r"\s+\| 0/2\s+\| 12\s+\| 0-03:00:00",
         )
 
     def test_prints_the_estimate_grid_with_reasons_and_skipped_cells(self):
@@ -125,14 +144,18 @@ class ReportTests(unittest.TestCase):
             "nodes": "1",
             "tres": "N/A",
             "nodelist": "",
+            "sched_nodes": "kn134",
+            "time_left": "3:00:00",
         }
 
         text = self.render(make_snapshot([job]))
 
+        self.assertIn("Start            | Time", text)
         self.assertRegex(
-            text, r"7\s+\| train\s+\| PENDING\s+\| gpu\s+\| 0-00:00:00/0-03:00:00\s+\|"
+            text,
+            r"7\s+\| train\s+\| PENDING\s+\| gpu\s+\| 2026-10-07 15:00\s+\| "
+            r"0-00:00:00/0-03:00:00\s+\| 0-03:00:00\s+\| kn134 \(planned\)\s+\| Priority",
         )
-        self.assertIn("(Priority)", text)
 
 
 class ReportsTests(unittest.TestCase):

@@ -57,6 +57,37 @@ message_noise = ["Banner: .*?\\\\."]
         self.assertEqual(mine.srun_program, ("bash",))
         self.assertEqual(mine.message_noise, ("Banner: .*?\\.",))
 
+    def test_reads_the_mail_table(self):
+        self.assertEqual(
+            profiles.load_mail(self.config('[mail]\nuser = "me@example.com"\n')),
+            ("me@example.com", "BEGIN,END,FAIL"),
+        )
+        self.assertEqual(
+            profiles.load_mail(
+                self.config('[mail]\nuser = "me@example.com"\ntype = "end, fail"\n')
+            ),
+            ("me@example.com", "END,FAIL"),
+        )
+        self.assertIsNone(profiles.load_mail(self.config("[clusters.x]\n")))
+        self.assertIsNone(profiles.load_mail("/nonexistent"))
+
+    def test_the_repository_config_emails_on_begin_end_and_fail(self):
+        user, kind = profiles.load_mail()
+
+        self.assertIn("@", user)
+        self.assertEqual(kind, "BEGIN,END,FAIL")
+
+    def test_rejects_a_broken_mail_table(self):
+        for text in (
+            'mail = "me@example.com"\n',
+            "[mail]\n",
+            '[mail]\nuser = "me"\n',
+            '[mail]\nuser = "me@example.com"\ntype = "SOMETIMES"\n',
+            '[mail]\nuser = "me@example.com"\nto = "x"\n',
+        ):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                profiles.load_mail(self.config(text))
+
     def test_rejects_unknown_or_invalid_settings(self):
         for text in (
             '[clusters.x]\nwaltimes = ["1h"]\n',

@@ -21,6 +21,7 @@ from textual.containers import Container, Grid, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
+    Checkbox,
     DataTable,
     Footer,
     Input,
@@ -93,10 +94,22 @@ class RequestScreen(ModalScreen):
         walltimes = ", ".join(slurm.format_duration(m) for m in settings.walltimes)
         with Vertical(id="request-dialog"):
             yield Label("Probe request", classes="dialog-title")
+            yield Checkbox(
+                "Whole node (--exclusive --mem=0, all GPUs)",
+                settings.whole_node,
+                id="whole-node",
+            )
             yield Label("CPUs per task")
-            yield Input(str(settings.cpus), id="cpus", type="integer")
+            yield Input(
+                str(settings.cpus),
+                id="cpus",
+                type="integer",
+                disabled=settings.whole_node,
+            )
             yield Label("Memory")
-            yield Input(settings.mem, id="mem", placeholder="32G")
+            yield Input(
+                settings.mem, id="mem", placeholder="32G", disabled=settings.whole_node
+            )
             yield Label("Walltimes (blank: one per partition time limit)")
             yield Input(walltimes, id="walltimes", placeholder="0-03:00:00, 1-00:00:00")
             yield Label("Extra options for every probe")
@@ -104,6 +117,10 @@ class RequestScreen(ModalScreen):
                 shlex.join(settings.extra),
                 id="extra",
                 placeholder="--partition=name --constraint=feature",
+            )
+            yield Label(f"Email on {settings.mail_type} (blank: no email)")
+            yield Input(
+                settings.mail_user or "", id="mail", placeholder="you@example.com"
             )
             yield Label("", id="request-error")
             with Horizontal(id="request-buttons"):
@@ -114,6 +131,12 @@ class RequestScreen(ModalScreen):
     def cancel(self):
         self.dismiss(None)
 
+    @on(Checkbox.Changed, "#whole-node")
+    def whole_node_changed(self, event):
+        # A whole node brings its own CPUs and memory.
+        for field in ("#cpus", "#mem"):
+            self.query_one(field, Input).disabled = event.value
+
     @on(Input.Submitted)
     @on(Button.Pressed, "#apply")
     def apply(self):
@@ -121,14 +144,19 @@ class RequestScreen(ModalScreen):
             cpus = int(self.query_one("#cpus", Input).value)
             if cpus < 1:
                 raise ValueError("CPUs must be at least 1")
-            settings = probes.Settings(
-                command=self.settings.command,
+            mail = self.query_one("#mail", Input).value.strip()
+            if mail and ("@" not in mail or " " in mail):
+                raise ValueError("Email must be an address, or blank for none")
+            settings = dataclasses.replace(
+                self.settings,
                 cpus=cpus,
                 mem=self.query_one("#mem", Input).value.strip() or "32G",
                 extra=tuple(shlex.split(self.query_one("#extra", Input).value)),
                 walltimes=probes.parse_walltimes(
                     self.query_one("#walltimes", Input).value
                 ),
+                mail_user=mail or None,
+                whole_node=self.query_one("#whole-node", Checkbox).value,
             )
         except ValueError as error:
             self.query_one("#request-error", Label).update(Text(str(error), "red"))
@@ -173,6 +201,11 @@ class ClusterView(Vertical):
         self.probed_at = None
         self.error = None
         self.detail_from = "partitions"
+        # True from starting a collection until its outcome is shown. Kept
+        # here rather than read from the worker, which is still winding down
+        # when its outcome arrives, so a refresh asked for then (say, right
+        # after logging in) is not dropped.
+        self.collecting = False
         # Set when the tab is opened: if that first refresh cannot connect,
         # ssh gets the terminal to ask for a password or MFA.
         self.login_on_failure = False
@@ -183,12 +216,14 @@ class ClusterView(Vertical):
         with Horizontal(id="topbar"):
             yield Static(self.identity(), id="identity")
             yield Static("loading…", id="status")
+        # Partitions span the top; estimates sit below on the left, beside
+        # accounts and jobs (the grid fills cells in this order).
         with Dashboard(id="dashboard"):
             with Container(id="left-top"):
                 yield self.table("partitions", "Partitions", "row")
                 yield self.table("hardware", "Nodes by hardware", "row")
-            yield self.table("scopes", "Accounts & QOS", "row")
             yield self.table("estimates", "Start estimates", "cell")
+            yield self.table("scopes", "Accounts & QOS", "row")
             yield self.table("jobs", "My jobs", "row")
         yield Static(id="detail")
 
@@ -220,7 +255,16 @@ class ClusterView(Vertical):
         self.tables["hardware"].display = False
         self.detail.border_title = "Details"
         self.tables["partitions"].add_columns(
-            "Partition", "Use", "Load", "Free", "Idle", "Pend", "Max"
+            "Partition",
+            "Use",
+            "CPU/node",
+            "Mem/node",
+            "GPU/node",
+            "Load",
+            "Free",
+            "Idle",
+            "Pend",
+            "Max",
         )
         self.tables["hardware"].add_columns(
             "Hardware", "Nodes", "States", "CPUs free", "Mem free (GB)", "GPUs free"
@@ -228,7 +272,9 @@ class ClusterView(Vertical):
         self.tables["scopes"].add_columns(
             "Account", "QOS", "Jobs", "GPUs", "Wall", "FS"
         )
-        self.tables["jobs"].add_columns("Job", "Name", "St", "Time", "Start / where")
+        self.tables["jobs"].add_columns(
+            "Job", "Name", "St", "Start", "Time", "Left", "Nodes", "Reason"
+        )
         # Nothing is fetched until the tab is opened (`activate`).
         if self.host.ssh:
             self.status.update("not checked yet")
@@ -279,14 +325,9 @@ class ClusterView(Vertical):
 
     def refresh_snapshot(self):
         """Collect in the background, unless a collection is still running."""
-        busy = any(
-            worker.node is self
-            and worker.group == "snapshot"
-            and not worker.is_finished
-            for worker in self.app.workers
-        )
-        if busy:
+        if self.collecting:
             return
+        self.collecting = True
         if self.snap is None:
             self.status.update("loading…")
             for table in self.tables.values():
@@ -305,13 +346,14 @@ class ClusterView(Vertical):
             self.app.call_from_thread(self.disconnected, str(error))
             return
         except Exception as error:  # Keep the dashboard up; say what broke.
-            self.app.call_from_thread(
-                self.notify,
-                f"{self.cluster.name}: refresh failed: {error!r}",
-                severity="error",
-            )
+            self.app.call_from_thread(self.collect_failed, error)
             return
         self.app.call_from_thread(self.apply_snapshot, snap)
+
+    def collect_failed(self, error):
+        self.collecting = False
+        self.loaded()
+        self.notify(f"{self.cluster.name}: refresh failed: {error!r}", severity="error")
 
     def detected(self, info):
         self.info = info
@@ -322,6 +364,7 @@ class ClusterView(Vertical):
 
         Right after the tab is opened, ssh then gets the terminal to log in.
         """
+        self.collecting = False
         self.error = message
         self.loaded()
         self.update_status()
@@ -332,6 +375,7 @@ class ClusterView(Vertical):
 
     def apply_snapshot(self, snap):
         first = self.snap is None
+        self.collecting = False
         self.snap = snap
         self.error = None
         self.login_on_failure = False
@@ -392,6 +436,9 @@ class ClusterView(Vertical):
                     (
                         Text(summary["name"] + ("*" if summary["default"] else "")),
                         usable,
+                        views.node_cpus(summary),
+                        views.node_mem(summary),
+                        views.node_gpus(summary, self.snap.gpu_names),
                         load_bar(summary),
                         views.free_resources(summary, self.snap.gpu_names),
                         views.idle_nodes(summary),
@@ -452,10 +499,11 @@ class ClusterView(Vertical):
     def fill_jobs(self):
         table = self.tables["jobs"]
         jobs = self.snap.jobs
-        now = datetime.datetime.now()
         if not jobs:
             message = "squeue failed" if jobs is None else "No jobs in the queue"
-            self.refill(table, [("none", (Text(message, "dim"), "", "", "", ""))])
+            self.refill(
+                table, [("none", (Text(message, "dim"), "", "", "", "", "", "", ""))]
+            )
             return
         rows = []
         for job in jobs:
@@ -471,12 +519,35 @@ class ClusterView(Vertical):
                         job["id"],
                         name,
                         Text(views.short_state(state), JOB_STATE_STYLES.get(state, "")),
+                        views.job_start_time(job, compact=True),
                         elapsed,
-                        views.job_start(job, now),
+                        self.time_left_cell(job),
+                        self.job_nodes_cell(job),
+                        views.job_reason(job),
                     ),
                 )
             )
         self.refill(table, rows)
+
+    @staticmethod
+    def time_left_cell(job):
+        """Time left; a running job near its limit stands out, a pending
+        job's whole limit is dimmed."""
+        text = views.job_time_left(job)
+        if job["state"] != "RUNNING":
+            return Text(text, "dim")
+        minutes = slurm.parse_duration(job.get("time_left", ""))
+        if minutes is not None and minutes < 10:
+            return Text(text, "bold red")
+        if minutes is not None and minutes < 60:
+            return Text(text, "yellow")
+        return Text(text)
+
+    @staticmethod
+    def job_nodes_cell(job):
+        """Where the job runs; nodes only planned for it are dimmed."""
+        nodes, planned = views.job_nodes(job)
+        return Text(nodes, "dim italic" if planned else "")
 
     def fill_estimates(self):
         table = self.tables["estimates"]
@@ -503,10 +574,10 @@ class ClusterView(Vertical):
             )
         settings = grid.settings
         table.border_title = f"Start estimates · {grid.scope.label}"
-        extra = f" {shlex.join(settings.extra)}" if settings.extra else ""
-        table.border_subtitle = (
-            f"{settings.command} -c{settings.cpus} --mem={settings.mem}{extra}"
-        )
+        notes = ["whole node"] if settings.whole_node else []
+        if settings.mail_user:
+            notes.append(f"email on {settings.mail_type}")
+        table.border_subtitle = " · ".join([settings.describe(), *notes])
 
     def estimate_cell(self, row, column, now):
         text, kind = views.cell(self.grid, row, column, now)
@@ -653,6 +724,7 @@ class ClusterView(Vertical):
                 f"Nodes {summary['node_count']} "
                 f"({views.state_counts(summary['states'])}) · pending jobs {pending}"
             ),
+            Text(" · ".join(views.node_kinds(summary, self.snap.gpu_names))),
             Text(
                 f"CPUs {cpus['free']} free / {cpus['allocated']} allocated / "
                 f"{cpus.get('unavailable', 0)} unavailable of {cpus['total']} · "
@@ -759,26 +831,31 @@ class ClusterView(Vertical):
 
     def job_detail(self, job):
         state = Text(job["state"], JOB_STATE_STYLES.get(job["state"], ""))
+        reason = views.job_reason(job)
         header = Text.assemble(
             (f"{job['id']} ", "bold"),
             (job["name"], "bold"),
             "  ",
             state,
-            f" ({job['reason']})" if job["reason"] not in ("None", "") else "",
+            f" ({reason})" if reason != "-" else "",
         )
+        nodes, planned = views.job_nodes(job)
+        where = f"planned on {nodes}" if planned else f"on {nodes}"
+        started = "starts" if job["state"] == "PENDING" else "started"
         return Group(
             header,
             Text(
                 f"{job['account']}/{job['qos']} in {job['partition']} · "
-                f"submitted {job['submit']} · start {job['start']}"
+                f"submitted {job['submit']} · {started} {views.job_start_time(job)} "
+                f"{where}"
             ),
             Text(
                 f"{job['cpus']} CPUs · {job['mem']} · {job['nodes']} node(s) · "
                 f"{job['tres'] if job['tres'] != 'N/A' else 'no GRES'} · "
                 f"elapsed {slurm.normalize_time(job['elapsed'])} of "
-                f"{slurm.normalize_time(job['time_limit'])}"
+                f"{slurm.normalize_time(job['time_limit'])}, "
+                f"{views.job_time_left(job)} left"
             ),
-            Text(job["nodelist"] or "", style="dim"),
         )
 
     # --- Actions -------------------------------------------------------------
@@ -873,17 +950,21 @@ class NodeStateApp(App):
     #identity { width: 1fr; }
     #status { width: auto; color: $text-muted; }
     #dashboard {
-        grid-size: 2 2;
+        grid-size: 2 3;
         grid-columns: 3fr 2fr;
-        grid-rows: 1fr 1fr;
+        grid-rows: 3fr 2fr 2fr;
         height: 1fr;
     }
+    #left-top { column-span: 2; }
+    #estimates { row-span: 2; }
     #dashboard.narrow {
         grid-size: 1;
         grid-columns: 1fr;
         grid-rows: auto;
         overflow-y: auto;
     }
+    #dashboard.narrow #left-top { column-span: 1; }
+    #dashboard.narrow #estimates { row-span: 1; }
     #dashboard.narrow #left-top { height: auto; }
     #dashboard.narrow DataTable { height: auto; max-height: 16; }
     #left-top { height: 1fr; }
@@ -910,6 +991,7 @@ class NodeStateApp(App):
         padding: 1 2;
     }
     .dialog-title { text-style: bold; margin-bottom: 1; }
+    #whole-node { margin-bottom: 1; }
     #request-buttons { height: auto; align-horizontal: right; margin-top: 1; }
     #request-buttons Button { margin-left: 1; }
     """
@@ -966,8 +1048,14 @@ class NodeStateApp(App):
             self.view.activate()
 
     def check_action(self, action, parameters):
-        """While the request dialog is open, only quitting reaches the dashboard."""
-        return action == "quit" or not isinstance(self.screen, RequestScreen)
+        """Keep the request dialog from switching clusters under itself.
+
+        Textual's own app actions (moving focus with Tab, the command palette)
+        must keep working in the dialog.
+        """
+        if action == "switch_cluster":
+            return not isinstance(self.screen, RequestScreen)
+        return True
 
     def action_switch_cluster(self, step):
         index = self.views.index(self.view)

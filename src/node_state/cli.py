@@ -69,6 +69,7 @@ def main(argv=None):
 
     try:
         clusters = find_clusters()
+        mail = profiles.load_mail()
     except ValueError as error:
         sys.exit(f"node_state: clusters.toml: {error}")
     if not clusters:
@@ -77,6 +78,8 @@ def main(argv=None):
             "cluster in clusters.toml has an ssh host."
         )
     settings = probes.Settings()
+    if mail is not None:
+        settings = probes.Settings(mail_user=mail[0], mail_type=mail[1])
 
     if not sys.stdout.isatty():
         # Like the dashboard at startup, the report covers the cluster this

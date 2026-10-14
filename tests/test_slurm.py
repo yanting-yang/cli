@@ -790,11 +790,11 @@ class ParsePartitionsTests(unittest.TestCase):
 
 SQUEUE = (
     "101|RUNNING|gpu|lab|normal|1:02:03|3:00:00|2026-10-07T10:00:00|"
-    "2026-10-07T09:59:00|None|4|32G|1|gres/gpu:l40s:1|kn001|train|a|b\n"
+    "2026-10-07T09:59:00|None|4|32G|1|gres/gpu:l40s:1|kn001|(null)|1:57:57|train|a|b\n"
     "102|PENDING|gpu|lab|high|0:00|1-00:00:00|2026-10-08T06:00:00|"
-    "2026-10-07T11:00:00|Priority|8|64G|1|gres/gpu:h100:2||eval\n"
+    "2026-10-07T11:00:00|Priority|8|64G|1|gres/gpu:h100:2||kn005|1-00:00:00|eval\n"
     "103|PENDING|gpu,cpu|lab|normal|0:00|1:00:00|N/A|"
-    "2026-10-07T11:00:00|Dependency|1|4G|1|N/A||post\n"
+    "2026-10-07T11:00:00|Dependency|1|4G|1|N/A||(null)|1:00:00|post\n"
 )
 
 
@@ -809,6 +809,9 @@ class JobTests(unittest.TestCase):
         self.assertEqual(jobs[0]["name"], "train|a|b")
         self.assertEqual(jobs[1]["start"], "2026-10-08T06:00:00")
         self.assertEqual(jobs[1]["nodelist"], "")
+        self.assertEqual(jobs[1]["sched_nodes"], "kn005")
+        self.assertEqual(jobs[0]["sched_nodes"], "(null)")
+        self.assertEqual(jobs[0]["time_left"], "1:57:57")
 
     def test_counts_jobs_overall_and_per_qos(self):
         jobs = slurm.parse_jobs(SQUEUE)

@@ -196,6 +196,38 @@ class GridTests(unittest.TestCase):
             ],
         )
 
+    def test_asks_for_a_whole_node_instead_of_cpus_and_memory(self):
+        settings = Settings(whole_node=True, cpus=8, mem="64G")
+        directives = self.grid(settings=settings).directives(0, 0)
+
+        self.assertEqual(
+            directives,
+            [
+                "--test-only",
+                "--gres=gpu:l40s:2",
+                "--exclusive",
+                "--mem=0",
+                "-t0-03:00:00",
+            ],
+        )
+        self.assertEqual(settings.describe(), "sbatch --exclusive --mem=0")
+        self.assertEqual(Settings(mem="64G").describe(), "sbatch -c4 --mem=64G")
+
+    def test_asks_for_email_on_every_probe_when_set(self):
+        grid = self.grid(
+            settings=Settings(mail_user="me@example.com", extra=("--constraint=ib",))
+        )
+
+        self.assertEqual(
+            grid.directives(1, 0)[-3:],
+            [
+                "--mail-type=BEGIN,END,FAIL",
+                "--mail-user=me@example.com",
+                "--constraint=ib",
+            ],
+        )
+        self.assertNotIn("--mail-user=me@example.com", self.grid().directives(1, 0))
+
     def test_skips_walltimes_over_the_wall_cap(self):
         grid = self.grid(max_wall=180)
 
@@ -314,6 +346,14 @@ class BuildGridTests(unittest.TestCase):
         self.assertEqual(grid.walltimes, [180])
         self.assertEqual(grid.max_wall, 120)
         self.assertEqual(grid.shell, "zsh")
+
+        # A whole node probes all of its GPUs, whatever the caps or profile say.
+        whole = probes.build_grid(
+            snap, Scope("lab", "normal"), Settings(whole_node=True), GENERIC, info
+        )
+        self.assertEqual(
+            [request.label for request in whole.requests], ["4x L40S", "CPU only"]
+        )
 
 
 class CleanMessageTests(unittest.TestCase):

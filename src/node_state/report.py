@@ -1,7 +1,6 @@
 """Plain-text report: the TUI's panels printed once, for pipes and scripts."""
 
 import datetime
-import shlex
 
 from . import hosts, probes, slurm, snapshot, views
 from .snapshot import Scope
@@ -30,6 +29,9 @@ def print_partitions(snap):
         (
             summary["name"] + ("*" if summary["default"] else ""),
             "yes" if summary["usable"] else f"no ({summary['access_note']})",
+            views.node_cpus(summary),
+            views.node_mem(summary),
+            views.node_gpus(summary, snap.gpu_names),
             f"{views.load_percent(summary)}%",
             views.free_resources(summary, snap.gpu_names),
             views.idle_nodes(summary),
@@ -43,7 +45,18 @@ def print_partitions(snap):
         print("none reported\n")
         return
     print_table(
-        ["Partition", "Usable", "Load", "Free", "Idle nodes", "Pending", "Max time"],
+        [
+            "Partition",
+            "Usable",
+            "CPU/node",
+            "Mem/node",
+            "GPU/node",
+            "Load",
+            "Free",
+            "Idle nodes",
+            "Pending",
+            "Max time",
+        ],
         rows,
     )
 
@@ -104,10 +117,13 @@ def print_scopes(snap, user):
 
 def print_grid(grid, now):
     settings = grid.settings
-    extra = f" {shlex.join(settings.extra)}" if settings.extra else ""
+    request = settings.describe()
+    if settings.whole_node:
+        request += ", whole node"
+    if settings.mail_user:
+        request += f", email {settings.mail_user} on {settings.mail_type}"
     print(
-        f"Start estimates for {grid.scope.label} "
-        f"({settings.command} -c{settings.cpus} --mem={settings.mem}{extra}), "
+        f"Start estimates for {grid.scope.label} ({request}), "
         f"waits from {now:%Y-%m-%d %H:%M}:"
     )
     rows = [
@@ -175,10 +191,19 @@ def print_jobs(snap):
     if not snap.jobs:
         print("none\n")
         return
-    now = datetime.datetime.now()
     print_table(
-        ["Job", "Name", "State", "Partition", "Time", "Start / where"],
-        [views.job_row(job, now) for job in snap.jobs],
+        [
+            "Job",
+            "Name",
+            "State",
+            "Partition",
+            "Start",
+            "Time",
+            "Left",
+            "Nodes",
+            "Reason",
+        ],
+        [views.job_row(job) for job in snap.jobs],
     )
 
 

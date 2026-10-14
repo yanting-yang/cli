@@ -59,6 +59,10 @@ JOB_FIELDS = (
     ("nodes", "%D"),
     ("tres", "%b"),
     ("nodelist", "%N"),
+    # Nodes the backfill scheduler plans for a pending job, or "(null)".
+    ("sched_nodes", "%Y"),
+    # Time left before the limit; the whole limit while pending.
+    ("time_left", "%L"),
     ("name", "%j"),
 )
 

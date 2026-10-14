@@ -84,6 +84,7 @@ class MainTests(unittest.TestCase):
             (cli, "find_clusters", self.clusters),
             (cli, "connect", None),
             (cli.report, "print_reports", None),
+            (profiles, "load_mail", None),
         ]:
             patcher = patch.object(target, name, return_value=value)
             setattr(self, name, patcher.start())
@@ -112,6 +113,19 @@ class MainTests(unittest.TestCase):
 
         self.connect.assert_called_once_with([remote])
         self.print_reports.assert_called_once_with([remote], probes.Settings())
+
+    def test_adds_email_notification_from_the_config(self):
+        self.load_mail.return_value = ("me@example.com", "END,FAIL")
+        app = Mock()
+        with (
+            patch.object(cli.sys.stdout, "isatty", return_value=True),
+            patch("node_state.tui.NodeStateApp", return_value=app) as app_class,
+        ):
+            cli.main([])
+
+        settings = app_class.call_args.args[1]
+        self.assertEqual(settings.mail_user, "me@example.com")
+        self.assertEqual(settings.mail_type, "END,FAIL")
 
     def test_opens_the_dashboard_on_a_terminal(self):
         app = Mock()

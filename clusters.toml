@@ -19,6 +19,13 @@
 #
 # src/node_state/clusters.toml links here, so this file ships in the package.
 
+# Email notifications for every cluster: each probe and run command gets
+# --mail-type and --mail-user, so a submitted job emails `user` on these
+# states. Remove this table to leave them out.
+[mail]
+user = "yantingyang2024@gmail.com"
+type = "BEGIN,END,FAIL"
+
 # RCL routes jobs by GPU request rather than walltime, so one time is enough.
 [clusters.rcl]
 walltimes = ["0-01:00:00"]

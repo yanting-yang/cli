@@ -85,6 +85,54 @@ def free_resources(summary, names=None):
     return f"{summary['cpus']['free']}/{summary['cpus']['total']} CPUs"
 
 
+def _per_node(values, unit=""):
+    """Distinct per-node values: one, two as `a/b`, or a `min-max` range."""
+    distinct = sorted(set(values))
+    if not distinct:
+        return "-"
+    if len(distinct) <= 2:
+        return "/".join(str(value) for value in distinct) + unit
+    return f"{distinct[0]}-{distinct[-1]}{unit}"
+
+
+def node_cpus(summary):
+    """CPUs per node (effective, without reserved cores)."""
+    return _per_node(cpus for cpus, _, _ in summary["node_kinds"])
+
+
+def node_mem(summary):
+    """Memory per node in GiB, written the way `--mem` takes it."""
+    return _per_node((mem for _, mem, _ in summary["node_kinds"]), "G")
+
+
+def node_gpus(summary, names=None):
+    """GPUs per node: `8x h100`, `4x h100 / 8x h200`, or a range of totals."""
+    names = names or {}
+    configs = sorted({tuple(sorted(gpus)) for _, _, gpus in summary["node_kinds"]})
+    if not configs or configs == [()]:
+        return "-"
+
+    def describe(config):
+        if not config:
+            return "0"
+        if len(config) > 2:
+            return f"{sum(count for _, count in config)}x ({len(config)} types)"
+        return " + ".join(f"{count}x {names.get(gpu, gpu)}" for gpu, count in config)
+
+    if len(configs) <= 2:
+        return " / ".join(describe(config) for config in configs)
+    totals = sorted(sum(count for _, count in config) for config in configs)
+    return f"{totals[0]}-{totals[-1]}x ({len(configs)} kinds)"
+
+
+def node_kinds(summary, names=None):
+    """Each hardware kind in a partition with its node count, largest first."""
+    return [
+        f"{count} node{'' if count == 1 else 's'}: {snapshot.hw_key_label(key, names)}"
+        for key, count in summary["node_kinds"].most_common()
+    ]
+
+
 def idle_nodes(summary):
     return f"{summary['states'].get('idle', 0)}/{summary['node_count']}"
 
@@ -126,15 +174,44 @@ def short_state(state):
     return SHORT_STATES.get(state, state[:2])
 
 
-def job_start(job, now):
-    """When a job started or is expected to, relative to now where known."""
+def job_start_time(job, compact=False):
+    """When a job started, or Slurm expects it to: `2026-10-14 16:18`.
+
+    `compact` drops the year (`10-14 16:18`). A pending job Slurm has not
+    planned yet shows `-`.
+    """
     start = parse_time(job["start"])
-    if job["state"] == "RUNNING":
-        return job["nodelist"] or "-"
     if start is None:
-        return f"({job['reason']})"
-    when = "now" if start <= now else f"in {probes.format_wait(start, now)}"
-    return f"{when} ({job['reason']})"
+        return "-"
+    return f"{start:%m-%d %H:%M}" if compact else f"{start:%Y-%m-%d %H:%M}"
+
+
+def job_nodes(job):
+    """The job's nodes, and whether they are only planned.
+
+    A running job's nodes are where it runs; a pending one has the nodes the
+    scheduler plans for it, if it has planned that far.
+    """
+    if job["nodelist"]:
+        return job["nodelist"], False
+    planned = job.get("sched_nodes", "")
+    if planned and planned not in ("(null)", "N/A"):
+        return planned, True
+    return "-", False
+
+
+def job_time_left(job):
+    """Time left before the job's limit, as `D-HH:MM:SS`.
+
+    For a pending job this is its whole limit.
+    """
+    return slurm.normalize_time(job.get("time_left", "") or "-")
+
+
+def job_reason(job):
+    """Why a job waits; nothing for one that runs."""
+    reason = job["reason"]
+    return "-" if reason in ("None", "", "(null)") else reason
 
 
 def parse_time(text):
@@ -144,15 +221,19 @@ def parse_time(text):
         return None
 
 
-def job_row(job, now):
+def job_row(job):
     time = job["elapsed"] if job["state"] != "PENDING" else "0"
+    nodes, planned = job_nodes(job)
     return (
         job["id"],
         job["name"],
         job["state"],
         job["partition"],
+        job_start_time(job),
         f"{slurm.normalize_time(time)}/{slurm.normalize_time(job['time_limit'])}",
-        job_start(job, now),
+        job_time_left(job),
+        f"{nodes} (planned)" if planned else nodes,
+        job_reason(job),
     )
 
 
