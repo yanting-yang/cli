@@ -161,7 +161,7 @@ class MainTests(unittest.TestCase):
             cli.main(["--help"])
 
         self.assertEqual(raised.exception.code, 0)
-        self.assertIn("clusters.toml", stdout.getvalue())
+        self.assertIn("config.toml", stdout.getvalue())
 
     def test_exits_with_a_message_for_a_broken_config(self):
         self.find_clusters.side_effect = ValueError("bad setting")
@@ -176,7 +176,7 @@ class MainTests(unittest.TestCase):
             cli.main([])
 
         self.assertIn(
-            "no cluster in clusters.toml has an ssh host", str(raised.exception.code)
+            "no cluster in config.toml has an ssh host", str(raised.exception.code)
         )
 
 

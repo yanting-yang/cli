@@ -5,13 +5,12 @@ from unittest.mock import Mock
 
 from fakes import FakeHost, scheduler_reply
 
-from node_state import probes, profiles, slurm, snapshot
+from node_state import probes, profiles, snapshot
 from node_state.probes import Grid, Request, Settings
 from node_state.snapshot import Limit, Scope
 
 GENERIC = profiles.Profile()
 RCL = profiles.load_profile("rcl")
-TAMIA = profiles.load_profile("tamia")
 
 
 class DurationTextTests(unittest.TestCase):
@@ -173,7 +172,7 @@ class GridTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            grid.directives(0, 1),
+            grid.probe_directives(0, 1),
             [
                 "--test-only",
                 "--qos=high",
@@ -185,7 +184,7 @@ class GridTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            grid.directives(1, 0),
+            grid.probe_directives(1, 0),
             [
                 "--test-only",
                 "--qos=high",
@@ -198,7 +197,7 @@ class GridTests(unittest.TestCase):
 
     def test_asks_for_a_whole_node_instead_of_cpus_and_memory(self):
         settings = Settings(whole_node=True, cpus=8, mem="64G")
-        directives = self.grid(settings=settings).directives(0, 0)
+        directives = self.grid(settings=settings).probe_directives(0, 0)
 
         self.assertEqual(
             directives,
@@ -213,20 +212,27 @@ class GridTests(unittest.TestCase):
         self.assertEqual(settings.describe(), "sbatch --exclusive --mem=0")
         self.assertEqual(Settings(mem="64G").describe(), "sbatch -c4 --mem=64G")
 
-    def test_asks_for_email_on_every_probe_when_set(self):
+    def test_adds_email_to_the_run_command_but_not_the_probe(self):
         grid = self.grid(
             settings=Settings(mail_user="me@example.com", extra=("--constraint=ib",))
         )
 
         self.assertEqual(
-            grid.directives(1, 0)[-3:],
+            grid.run_directives(1, 0),
             [
+                "-c4",
+                "--mem=32G",
+                "-t0-03:00:00",
                 "--mail-type=BEGIN,END,FAIL",
                 "--mail-user=me@example.com",
                 "--constraint=ib",
             ],
         )
-        self.assertNotIn("--mail-user=me@example.com", self.grid().directives(1, 0))
+        self.assertEqual(
+            grid.probe_directives(1, 0),
+            ["--test-only", "-c4", "--mem=32G", "-t0-03:00:00", "--constraint=ib"],
+        )
+        self.assertNotIn("--mail-user=me@example.com", self.grid().run_directives(1, 0))
 
     def test_skips_walltimes_over_the_wall_cap(self):
         grid = self.grid(max_wall=180)
@@ -238,7 +244,7 @@ class GridTests(unittest.TestCase):
     def test_runs_sbatch_and_returns_the_copyable_command(self):
         host = FakeHost(probe=lambda args: scheduler_reply("2030-01-01T00:00:00"))
 
-        probes.run_grid(self.grid(max_wall=180), GENERIC, host)
+        probes.run_grid(self.grid(max_wall=180), host)
 
         self.assertEqual(
             host.streamed[0][0],
@@ -252,16 +258,22 @@ class GridTests(unittest.TestCase):
                 "--wrap=sleep infinity",
             ],
         )
-        result = probes.run_grid(self.grid(), GENERIC, host).results[0, 0]
+        result = probes.run_grid(self.grid(), host).results[0, 0]
         self.assertTrue(result.ok)
         self.assertEqual(result.start, datetime.datetime(2030, 1, 1))
         self.assertEqual(result.partition, "gpu")
         self.assertEqual(result.message, "")
         self.assertEqual(
+            result.probe,
+            "sbatch --test-only --gres=gpu:l40s:2 -c4 --mem=32G -t0-03:00:00 "
+            '--wrap="sleep infinity"',
+        )
+        self.assertEqual(result.output, scheduler_reply("2030-01-01T00:00:00")[1])
+        self.assertEqual(shlex.split(result.command), list(result.run))
+        self.assertEqual(
             shlex.split(result.command),
             [
                 "sbatch",
-                "--test-only",
                 "--gres=gpu:l40s:2",
                 "-c4",
                 "--mem=32G",
@@ -270,22 +282,24 @@ class GridTests(unittest.TestCase):
             ],
         )
 
-    def test_runs_srun_with_the_profiles_program_and_cleans_the_reason(self):
+    def test_runs_srun_with_the_login_shell_and_cleans_the_reason(self):
         grid = self.grid(settings=Settings(command="srun"), max_wall=180)
         grid.shell = "zsh"
         host = FakeHost(probe=lambda args: (1, "srun: error: nope."))
 
-        result = probes.run_grid(grid, TAMIA, host).results[1, 0]
+        result = probes.run_grid(grid, host).results[1, 0]
 
         self.assertEqual(
             host.streamed[0][1],
-            ["srun", "--test-only", "-c4", "--mem=32G", "-t0-03:00:00", "bash"],
+            ["srun", "--test-only", "-c4", "--mem=32G", "-t0-03:00:00", "zsh"],
         )
         self.assertFalse(result.ok)
         self.assertEqual(result.message, "nope")
         self.assertEqual(
-            result.command, "srun --test-only -c4 --mem=32G -t0-03:00:00 --pty zsh"
+            result.probe, "srun --test-only -c4 --mem=32G -t0-03:00:00 zsh"
         )
+        self.assertEqual(result.output, "srun: error: nope.")
+        self.assertEqual(result.command, "srun -c4 --mem=32G -t0-03:00:00 --pty zsh")
 
     def test_runs_every_cell_and_reports_each_result(self):
         grid = self.grid(max_wall=180)
@@ -293,7 +307,6 @@ class GridTests(unittest.TestCase):
 
         probes.run_grid(
             grid,
-            GENERIC,
             FakeHost(),
             lambda row, column, result: seen.append((row, column)),
         )
@@ -304,14 +317,34 @@ class GridTests(unittest.TestCase):
     def test_stops_once_asked(self):
         grid = self.grid()
 
-        probes.run_grid(grid, GENERIC, FakeHost(), should_stop=lambda: True)
+        probes.run_grid(grid, FakeHost(), should_stop=lambda: True)
 
         self.assertEqual(grid.results, {})
+
+    def test_recleans_rejections_once_an_accepted_reply_shows_the_banner(self):
+        replies = iter(
+            [
+                (1, RCL_BANNER + "sbatch: error: too big\n"),
+                (0, RCL_BANNER + "sbatch: Job 2 to start at 2030-01-01T00:00:00\n"),
+            ]
+        )
+        grid = self.grid(max_wall=180)
+        shared = grid.banner
+
+        probes.run_grid(grid, FakeHost(probe=lambda args: next(replies)))
+
+        self.assertEqual(grid.results[0, 0].message, "too big")
+        self.assertTrue(grid.results[1, 0].ok)
+        # A later grid sharing the set cleans its reasons from the start.
+        later = self.grid(max_wall=180)
+        later.banner = shared
+        host = FakeHost(probe=lambda args: (1, RCL_BANNER + "sbatch: error: no\n"))
+        self.assertEqual(probes.run_grid(later, host).results[0, 0].message, "no")
 
     def test_says_something_when_a_reply_is_all_noise(self):
         host = FakeHost(probe=lambda args: (1, "sbatch: error: ----------"))
 
-        result = probes.run_grid(self.grid(max_wall=180), GENERIC, host).results[0, 0]
+        result = probes.run_grid(self.grid(max_wall=180), host).results[0, 0]
 
         self.assertEqual(result.message, "rejected without a reason")
 
@@ -355,6 +388,64 @@ class BuildGridTests(unittest.TestCase):
             [request.label for request in whole.requests], ["4x L40S", "CPU only"]
         )
 
+    def test_asks_for_whole_gpu_nodes_where_gpus_go_by_node(self):
+        nodes = [{"name": "a", "cfg_gpus": {"h100": 4}, "partitions": ["gpu"]}]
+        partitions = [{"name": "gpu", "max_time": 180, "usable": True}]
+        snap = Mock(nodes=nodes, partitions=partitions, gpu_names={})
+        snap.limits.return_value = []
+        info = snapshot.ClusterInfo("tamia", "1", "me", "login", None)
+        profile = profiles.Profile("tamia", gpu_counts="whole_node")
+
+        grid = probes.build_grid(snap, Scope(), Settings(), profile, info)
+
+        self.assertEqual(
+            [request.label for request in grid.requests], ["4x h100", "CPU only"]
+        )
+        # Every CPU and all the memory with the GPUs; CPU-only keeps -c/--mem.
+        self.assertEqual(
+            grid.probe_directives(0, 0),
+            [
+                "--test-only",
+                "--gres=gpu:h100:4",
+                "--exclusive",
+                "--mem=0",
+                "-t0-03:00:00",
+            ],
+        )
+        self.assertEqual(
+            grid.run_directives(1, 0), ["-c4", "--mem=32G", "-t0-03:00:00"]
+        )
+        self.assertTrue(grid.gpus_by_node)
+        self.assertFalse(
+            probes.build_grid(snap, Scope(), Settings(), GENERIC, info).gpus_by_node
+        )
+        # Asking for whole nodes covers every row, so it is not noted twice.
+        whole = probes.build_grid(
+            snap, Scope(), Settings(whole_node=True), profile, info
+        )
+        self.assertFalse(whole.gpus_by_node)
+        self.assertEqual(
+            whole.run_directives(1, 0), ["--exclusive", "--mem=0", "-t0-03:00:00"]
+        )
+
+
+# Printed with every RCL reply, accepted or not, once the submit filter
+# passes a request.
+RCL_BANNER = (
+    "sbatch: error: " + "=" * 71 + "\n"
+    "sbatch: error: STORAGE POLICY: Please ensure large job outputs "
+    "are written to /scratch\n"
+    "sbatch: error: Please delete files from /scratch after you are "
+    "done with your work.   \n"
+    "sbatch: error: " + "=" * 71 + "\n"
+)
+# Printed with every Fir and Tamia reply that asks for memory in G.
+TAMIA_NOTE = (
+    "sbatch: NOTE: Your memory request of 32768.0M was likely submitted as 32.0G. "
+    "Please note that Slurm interprets memory requests denominated in G as "
+    "multiples of 1024M, not 1000M.\n"
+)
+
 
 class CleanMessageTests(unittest.TestCase):
     def test_strips_prefixes_and_unspecified_error_boilerplate(self):
@@ -368,42 +459,37 @@ class CleanMessageTests(unittest.TestCase):
             "Limited account 'you': GPUs - at most 1 MIG slice per job (you requested 2)",
         )
 
-    def test_strips_the_rcl_storage_policy_banner(self):
-        raw = slurm.parse_test_output(
-            "sbatch: error: " + "=" * 71 + "\n"
-            "sbatch: error: STORAGE POLICY: Please ensure large job outputs "
-            "are written to /scratch\n"
-            "sbatch: error: Please delete files from /scratch after you are "
-            "done with your work.   \n"
-            "sbatch: error: " + "=" * 71 + "\n"
-            "allocation failure: Invalid qos specification\n",
-            1,
-            "sbatch",
-        )["result"]
+    def test_leaves_out_lines_an_accepted_reply_printed_too(self):
+        accepted = RCL_BANNER + "sbatch: Job 1 to start at 2030-01-01T00:00:00\n"
+        banner = set()
+        grid = Grid(Scope(), Settings(), [Request()], [60], banner=banner)
+        probes.learn_banner(grid, accepted)
 
         self.assertEqual(
-            probes.clean_message(raw, RCL.message_noise),
+            probes.clean_message(
+                RCL_BANNER + "allocation failure: Invalid qos specification\n",
+                banner,
+            ),
             "allocation failure: Invalid qos specification",
         )
+        # The start line is unique to each job, so it is not kept.
+        self.assertFalse(any("to start at" in line for line in banner))
 
     def test_strips_tamia_colour_codes_and_memory_note(self):
-        note = (
-            "NOTE: Your memory request of 32768M was likely submitted as 32G. Please "
-            "note that Slurm interprets memory requests denominated in G as multiples "
-            "of 1024M, not 1000M. "
-        )
-        raw = (
-            note + "sbatch: error: \x1b[00;31m---------------------------------------- "
-            "sbatch: error: The h100 GPUs are only allocated by node. "
-            "sbatch: error: ----------------------------------------\x1b[00m "
-            "allocation failure: Requested node configuration is not available"
+        rejected = (
+            TAMIA_NOTE
+            + "sbatch: error: \x1b[00;31m----------------------------------\n"
+            "sbatch: error: The h100 GPUs are only allocated by node.\n"
+            "sbatch: error: ----------------------------------\x1b[00m\n"
+            "allocation failure: Requested node configuration is not available\n"
         )
 
         self.assertEqual(
-            probes.clean_message(raw, TAMIA.message_noise),
+            probes.clean_message(rejected, set(probes.reply_lines(TAMIA_NOTE))),
             "The h100 GPUs are only allocated by node. allocation failure: "
             "Requested node configuration is not available",
         )
+        self.assertTrue(probes.clean_message(rejected).startswith("NOTE: Your memory"))
 
     def test_leaves_local_errors_alone(self):
         self.assertEqual(probes.clean_message("'srun' not found"), "'srun' not found")

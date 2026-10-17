@@ -8,3 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Your node_state settings, which hold your SMTP password
+config.toml
+.env

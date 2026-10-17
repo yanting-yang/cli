@@ -19,7 +19,8 @@ class FakeHost:
     `responses` maps the start of a command line (e.g. "scontrol show node")
     to its stdout, or None for a failure; unmatched commands fail.
     `probe(args)` returns (returncode, output) for each streamed command.
-    `lost` makes every call raise `hosts.ConnectionLost`.
+    `lost` makes every call raise `hosts.ConnectionLost`. `act` answers with
+    `act_reply`, recording the commands in `acted`.
     """
 
     def __init__(self, responses=None, probe=None, ssh=None, lost=None):
@@ -30,6 +31,14 @@ class FakeHost:
         self.path = None
         self.batches = []
         self.streamed = []
+        self.act_reply = (0, "Submitted batch job 77")
+        self.acted = []
+
+    def act(self, args, timeout=60):
+        if self.lost:
+            raise hosts.ConnectionLost(self.lost)
+        self.acted.append(args)
+        return self.act_reply
 
     def respond(self, args):
         line = " ".join(args)

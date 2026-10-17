@@ -5,13 +5,20 @@ while its tab is shown: at startup that is the local one, and a remote cluster
 is first reached over ssh (see `hosts`) when its tab is opened. The visible
 view collects data on a background thread every `REFRESH_SECONDS`, and probes
 run on their own worker, filling the estimates grid as replies arrive.
+
+`M` turns on the hourly email (`mailer`) of the clusters shown so far; it
+stops when the dashboard exits.
 """
 
 import dataclasses
 import datetime
+import re
 import shlex
 
+from rich.cells import cell_len
 from rich.console import Group
+from rich.measure import Measurement
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 from textual import on, work
@@ -32,7 +39,7 @@ from textual.widgets import (
 )
 from textual.worker import get_current_worker
 
-from . import hosts, probes, slurm, snapshot, views
+from . import hosts, mailer, probes, profiles, slurm, snapshot, views
 from .profiles import Profile
 
 REFRESH_SECONDS = 60
@@ -71,6 +78,55 @@ def load_bar(summary, width=8):
     bar.append("░" * cells[2], style="grey35")
     bar.append(f" {percent:>3}%")
     return bar
+
+
+class CommandLine:
+    """A command line that wraps between arguments, never inside a quoted one.
+
+    Rich wraps at any space, which would split `--wrap="sleep infinity"`.
+    """
+
+    WORD = re.compile(r"""(?:[^\s"']+|"[^"]*"|'[^']*')+""")
+
+    GAP = 2
+
+    def __init__(self, text, style="bold", suffix=None):
+        self.words = self.WORD.findall(text)
+        self.style = style
+        # Text kept whole after the last word, such as a Copy link.
+        self.suffix = suffix
+
+    def __rich_console__(self, console, options):
+        line = ""
+        for word in self.words:
+            if line and cell_len(line) + 1 + cell_len(word) > options.max_width:
+                yield Text(line, self.style)
+                line = word
+            else:
+                line = f"{line} {word}" if line else word
+        last = Text(line, self.style)
+        if self.suffix is not None:
+            if cell_len(line) + self.GAP + self.suffix.cell_len > options.max_width:
+                yield last
+                last = Text()
+            else:
+                last.append(" " * self.GAP)
+            last.append_text(self.suffix)
+        yield last
+
+    def __rich_measure__(self, console, options):
+        longest = max((cell_len(word) for word in self.words), default=0)
+        whole = cell_len(" ".join(self.words))
+        if self.suffix is not None:
+            longest = max(longest, self.suffix.cell_len)
+            whole += self.GAP + self.suffix.cell_len
+        return Measurement(longest, whole).clamp(max_width=options.max_width)
+
+
+def copy_link(command):
+    """A Copy link: a click copies `command` (`NodeStateApp.action_copy_command`)."""
+    meta = {"@click": ("app.copy_command", (command,))}
+    return Text("Copy", Style(color="cyan", underline=True, meta=meta))
 
 
 class Dashboard(Grid):
@@ -164,6 +220,40 @@ class RequestScreen(ModalScreen):
         self.dismiss(settings)
 
 
+class ConfirmScreen(ModalScreen):
+    """Ask before a command that acts on the cluster (submitting or releasing a
+    job): the exact command and what happens next. Dismisses with True to go
+    ahead."""
+
+    BINDINGS = [Binding("escape", "dismiss(False)", "Cancel")]
+    # Enter on a fresh dialog cancels; going ahead takes a deliberate choice.
+    AUTO_FOCUS = "#confirm-cancel"
+
+    def __init__(self, question, command, note, verb):
+        super().__init__()
+        self.question = question
+        self.command = command
+        self.note = note
+        self.verb = verb
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-dialog"):
+            yield Label(self.question, classes="dialog-title")
+            yield Static(CommandLine(self.command), id="confirm-command")
+            yield Static(Text(self.note, style="dim"))
+            with Horizontal(id="confirm-buttons"):
+                yield Button("Cancel", id="confirm-cancel")
+                yield Button(self.verb, id="confirm-ok", variant="warning")
+
+    @on(Button.Pressed, "#confirm-cancel")
+    def cancel(self):
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#confirm-ok")
+    def confirm(self):
+        self.dismiss(True)
+
+
 class ClusterView(Vertical):
     """One cluster's dashboard: identity line, four panels and details.
 
@@ -175,11 +265,7 @@ class ClusterView(Vertical):
     BINDINGS = [
         Binding("r", "refresh", "Refresh"),
         Binding("p", "probe", "Re-probe"),
-        Binding("a", "next_scope", "Account/QOS"),
         Binding("e", "edit_request", "Edit request"),
-        Binding("m", "toggle_command", "sbatch/srun"),
-        Binding("c", "copy", "Copy command"),
-        Binding("n", "toggle_nodes", "Nodes"),
         Binding("l", "login", "Log in"),
         Binding("1", "focus_table('partitions')", show=False),
         Binding("2", "focus_table('scopes')", show=False),
@@ -198,6 +284,8 @@ class ClusterView(Vertical):
         self.snap = None
         self.scope = None
         self.grid = None
+        # Banner lines learned from accepted probes, kept across re-probes.
+        self.banner = set()
         self.probed_at = None
         self.error = None
         self.detail_from = "partitions"
@@ -220,9 +308,12 @@ class ClusterView(Vertical):
         # accounts and jobs (the grid fills cells in this order).
         with Dashboard(id="dashboard"):
             with Container(id="left-top"):
-                yield self.table("partitions", "Partitions", "row")
-                yield self.table("hardware", "Nodes by hardware", "row")
-            yield self.table("estimates", "Start estimates", "cell")
+                # Clicking either title switches to the other (`app.toggle_nodes`).
+                toggle = Style(underline=True, meta={"@click": "app.toggle_nodes"})
+                yield self.table("partitions", Text("Partitions", toggle), "row")
+                yield self.table("hardware", Text("Nodes by hardware", toggle), "row")
+            # Titled with the probed account/QOS once there is one.
+            yield self.table("estimates", None, "cell")
             yield self.table("scopes", "Accounts & QOS", "row")
             yield self.table("jobs", "My jobs", "row")
         yield Static(id="detail")
@@ -273,7 +364,7 @@ class ClusterView(Vertical):
             "Account", "QOS", "Jobs", "GPUs", "Wall", "FS"
         )
         self.tables["jobs"].add_columns(
-            "Job", "Name", "St", "Start", "Time", "Left", "Nodes", "Reason"
+            "Job", "Name", "St", "Partition", "Start", "Time", "Left", "Nodes", "Reason"
         )
         # Nothing is fetched until the tab is opened (`activate`).
         if self.host.ssh:
@@ -403,14 +494,14 @@ class ClusterView(Vertical):
             status = Text("not connected", style="bold red")
             if self.snap is not None:
                 status.append(f" · last data {self.snap.taken_at:%H:%M:%S}", "dim")
-            self.status.update(status)
+        elif self.snap is None:
             return
-        if self.snap is None:
-            return
-        age = int((datetime.datetime.now() - self.snap.taken_at).total_seconds())
-        status = f"updated {self.snap.taken_at:%H:%M:%S} ({age}s ago)"
-        if self.probed_at is not None:
-            status += f" · probed {self.probed_at:%H:%M:%S}"
+        else:
+            age = int((datetime.datetime.now() - self.snap.taken_at).total_seconds())
+            status = Text(f"updated {self.snap.taken_at:%H:%M:%S} ({age}s ago)")
+            if self.probed_at is not None:
+                status.append(f" · probed {self.probed_at:%H:%M:%S}")
+        status.append_text(self.app.mail_status())
         self.status.update(status)
 
     # --- Tables --------------------------------------------------------------
@@ -494,21 +585,22 @@ class ClusterView(Vertical):
             )
         table = self.tables["scopes"]
         self.refill(table, rows)
-        table.border_subtitle = "* left out of commands · enter: probe"
+        table.border_subtitle = "* left out of commands"
 
     def fill_jobs(self):
         table = self.tables["jobs"]
         jobs = self.snap.jobs
         if not jobs:
             message = "squeue failed" if jobs is None else "No jobs in the queue"
-            self.refill(
-                table, [("none", (Text(message, "dim"), "", "", "", "", "", "", ""))]
-            )
+            self.refill(table, [("none", (Text(message, "dim"), *[""] * 8))])
             return
+
+        def clip(text, width=16):
+            return text if len(text) <= width else text[: width - 1] + "…"
+
         rows = []
         for job in jobs:
             state = job["state"]
-            name = job["name"] if len(job["name"]) <= 16 else job["name"][:15] + "…"
             elapsed = (
                 slurm.normalize_time(job["elapsed"]) if state != "PENDING" else "-"
             )
@@ -517,8 +609,10 @@ class ClusterView(Vertical):
                     job["id"],
                     (
                         job["id"],
-                        name,
+                        clip(job["name"]),
                         Text(views.short_state(state), JOB_STATE_STYLES.get(state, "")),
+                        # A pending job may list several; details show them all.
+                        clip(job["partition"]),
                         views.job_start_time(job, compact=True),
                         elapsed,
                         self.time_left_cell(job),
@@ -573,11 +667,22 @@ class ClusterView(Vertical):
                 scroll=False,
             )
         settings = grid.settings
-        table.border_title = f"Start estimates · {grid.scope.label}"
+        # Clicking the account/QOS probes the next one, when there is another.
+        title = Text(grid.scope.label)
+        if self.snap is not None and len(self.snap.scopes) > 1:
+            title.stylize(Style(underline=True, meta={"@click": "app.next_scope"}))
+        table.border_title = title
         notes = ["whole node"] if settings.whole_node else []
-        if settings.mail_user:
-            notes.append(f"email on {settings.mail_type}")
-        table.border_subtitle = " · ".join([settings.describe(), *notes])
+        if grid.gpus_by_node:
+            notes.append("GPUs by whole node")
+        # Clicking the command switches sbatch/srun, as m does.
+        toggle = Style(underline=True, meta={"@click": "app.toggle_command"})
+        subtitle = Text()
+        subtitle.append(settings.command, toggle)
+        subtitle.append(settings.describe().removeprefix(settings.command))
+        for note in notes:
+            subtitle.append(f" · {note}")
+        table.border_subtitle = subtitle
 
     def estimate_cell(self, row, column, now):
         text, kind = views.cell(self.grid, row, column, now)
@@ -594,6 +699,7 @@ class ClusterView(Vertical):
         self.grid = probes.build_grid(
             self.snap, self.scope, self.settings, self.profile, self.info
         )
+        self.grid.banner = self.banner
         self.probed_at = datetime.datetime.now()
         self.fill_estimates()
         self.fill_scopes()
@@ -607,9 +713,7 @@ class ClusterView(Vertical):
             self.app.call_from_thread(self.probe_landed, grid, row, column)
 
         try:
-            probes.run_grid(
-                grid, self.profile, self.host, report, lambda: worker.is_cancelled
-            )
+            probes.run_grid(grid, self.host, report, lambda: worker.is_cancelled)
         except hosts.ConnectionLost as error:
             self.app.call_from_thread(self.disconnected, str(error))
         except Exception as error:  # Keep the dashboard up; say what broke.
@@ -813,21 +917,43 @@ class ClusterView(Vertical):
             lines.append(line)
         else:
             lines.append(Text(f"Cannot run: {result.message}", style="red"))
-        prompt = f"{self.host.ssh}$" if self.host.ssh else "$"
-        lines.append(Text(f"{prompt} {result.command}", style="bold"))
-        if grid.settings.command == "srun":
-            usage = "drop --test-only to open an interactive shell on the allocation."
-        else:
-            usage = (
-                "drop --test-only to submit. The job holds the allocation with "
-                "'sleep infinity'; open a shell in it with "
-                "'srun --jobid=<id> --overlap --pty $SHELL', release it with "
-                "'scancel <id>'."
-            )
-        if self.host.ssh:
-            usage = f"run it on {self.cluster.name}; {usage}"
-        lines.append(Text(f"c copies it; {usage}", style="dim"))
+        lines.append(Text())
+        lines.append(self.commands_detail(result))
         return Group(*lines)
+
+    def commands_detail(self, result):
+        """The probe as it ran with its reply, then the command to submit.
+
+        Labels sit in their own column, so wrapped commands stay aligned.
+        """
+        prompt = f"{self.host.ssh}$" if self.host.ssh else "$"
+        output = probes.ANSI_ESCAPE.sub("", result.output) or "(no output)"
+        batch = result.run[0] == "sbatch"
+        hints = []
+        if self.host.ssh:
+            hints.append(f"run it on {self.cluster.name}")
+        if not batch:
+            # An interactive shell needs a terminal of its own.
+            hints.append("run it in a terminal for a shell on the allocation")
+        table = Table.grid(padding=(0, 2))
+        table.add_column(style="bold cyan", no_wrap=True)
+        table.add_column()
+        probe = CommandLine(f"{prompt} {result.probe}", suffix=copy_link(result.probe))
+        table.add_row("Probe", probe)
+        table.add_row("", Text(output, style="dim"))
+        table.add_row("", "")
+        # Clicking the label runs the app's action for the visible tab; only
+        # sbatch jobs are submitted from here.
+        submit = Text("Submit")
+        if batch:
+            submit.stylize(Style(underline=True, meta={"@click": "app.submit"}))
+        command = CommandLine(
+            f"{prompt} {result.command}", suffix=copy_link(result.command)
+        )
+        table.add_row(submit, command)
+        if hints:
+            table.add_row("", Text(" · ".join(hints), style="dim"))
+        return table
 
     def job_detail(self, job):
         state = Text(job["state"], JOB_STATE_STYLES.get(job["state"], ""))
@@ -856,7 +982,35 @@ class ClusterView(Vertical):
                 f"{slurm.normalize_time(job['time_limit'])}, "
                 f"{views.job_time_left(job)} left"
             ),
+            *self.job_commands(job),
         )
+
+    def job_commands(self, job):
+        """Commands for a queued job: a shell attached to it, and releasing it."""
+        if job["state"] not in ("RUNNING", "PENDING"):
+            return []
+        prompt = f"{self.host.ssh}$" if self.host.ssh else "$"
+        shell = self.info.shell if self.info else slurm.login_shell()
+        attach = shlex.join(
+            ["srun", f"--jobid={job['id']}", "--overlap", "--pty", shell]
+        )
+        suffix = copy_link(attach)
+        if job["state"] == "PENDING":
+            suffix = Text.assemble(("(once it starts)  ", "dim"), suffix)
+        release = f"scancel {job['id']}"
+        # Clicking Release cancels the job once a dialog confirms it.
+        label = Text("Release")
+        label.stylize(
+            Style(underline=True, meta={"@click": ("app.release_job", (job["id"],))})
+        )
+        table = Table.grid(padding=(0, 2))
+        table.add_column(style="bold cyan", no_wrap=True)
+        table.add_column()
+        table.add_row("Attach", CommandLine(f"{prompt} {attach}", suffix=suffix))
+        table.add_row(
+            label, CommandLine(f"{prompt} {release}", suffix=copy_link(release))
+        )
+        return [Text(), table]
 
     # --- Actions -------------------------------------------------------------
 
@@ -879,6 +1033,7 @@ class ClusterView(Vertical):
         self.notify(f"Probing {self.cluster.name} as {scope.label}")
 
     def action_next_scope(self):
+        """Probe with the next account/QOS (a click on the estimates' title)."""
         scopes = self.snap.scopes if self.snap else []
         if len(scopes) < 2:
             self.notify("No other account/QOS to probe with.")
@@ -899,18 +1054,120 @@ class ClusterView(Vertical):
 
         self.app.push_screen(RequestScreen(self.settings), done)
 
-    def action_copy(self):
+    def selected_result(self):
+        """The probe result under the estimates cursor, or None."""
         table = self.tables["estimates"]
-        result = None
-        if self.grid is not None and table.cursor_column > 0:
-            result = self.grid.results.get((table.cursor_row, table.cursor_column - 1))
+        if self.grid is None or table.cursor_column < 1:
+            return None
+        return self.grid.results.get((table.cursor_row, table.cursor_column - 1))
+
+    def action_submit(self):
+        """Submit the selected estimate's request once the dialog confirms it."""
+        result = self.selected_result()
         if result is None:
-            self.notify("Select a probed cell in Start estimates first.")
+            self.notify("Select a probed estimate first.")
             return
-        self.app.copy_to_clipboard(result.command)
-        self.notify(result.command, title="Copied")
+        if not result.ok:
+            self.notify(
+                f"Slurm would refuse this request: {result.message}",
+                severity="warning",
+            )
+            return
+        if result.run[0] != "sbatch":
+            self.notify("Only sbatch jobs are submitted from here; click Copy instead.")
+            return
+        prompt = f"{self.host.ssh}$" if self.host.ssh else "$"
+        note = (
+            "The job holds the allocation with 'sleep infinity' until its time "
+            "limit; release it early with scancel <id>."
+        )
+
+        def done(confirmed):
+            if confirmed:
+                self.submit_batch(result.run)
+
+        self.app.push_screen(
+            ConfirmScreen(
+                f"Submit this job on {self.cluster.name}?",
+                f"{prompt} {result.command}",
+                note,
+                "Submit",
+            ),
+            done,
+        )
+
+    @work(thread=True, group="submit")
+    def submit_batch(self, args):
+        try:
+            code, output = self.host.act(list(args))
+        except hosts.ConnectionLost as error:
+            self.app.call_from_thread(self.disconnected, str(error))
+            return
+        self.app.call_from_thread(self.submitted, code, output)
+
+    def submitted(self, code, output):
+        job = slurm.parse_submitted(output)
+        if code != 0 or job is None:
+            reason = probes.clean_message(
+                output or f"sbatch exited with status {code}", self.banner
+            )
+            self.notify(f"sbatch failed: {reason}", severity="error", timeout=15)
+            return
+        self.notify(
+            f"Batch job {job} on {self.cluster.name}; scancel {job} releases it.",
+            title="Submitted",
+            timeout=10,
+        )
+        self.refresh_snapshot()
+
+    def release_job(self, job_id):
+        """Release a job with scancel once the dialog confirms it."""
+        jobs = (self.snap.jobs if self.snap else None) or []
+        job = next((job for job in jobs if job["id"] == job_id), None)
+        if job is None:
+            self.notify(f"Job {job_id} is no longer in the queue.")
+            return
+        prompt = f"{self.host.ssh}$" if self.host.ssh else "$"
+        if job["state"] == "RUNNING":
+            note = "Whatever runs in it is killed and its allocation is released."
+        else:
+            note = "It leaves the queue without running."
+
+        def done(confirmed):
+            if confirmed:
+                self.cancel_job(job_id)
+
+        self.app.push_screen(
+            ConfirmScreen(
+                f"Release job {job_id} ({job['name']}) on {self.cluster.name}?",
+                f"{prompt} scancel {job_id}",
+                note,
+                "Release",
+            ),
+            done,
+        )
+
+    @work(thread=True, group="release")
+    def cancel_job(self, job_id):
+        try:
+            code, output = self.host.act(["scancel", job_id])
+        except hosts.ConnectionLost as error:
+            self.app.call_from_thread(self.disconnected, str(error))
+            return
+        self.app.call_from_thread(self.released, job_id, code, output)
+
+    def released(self, job_id, code, output):
+        if code != 0:
+            reason = probes.clean_message(
+                output or f"scancel exited with status {code}"
+            )
+            self.notify(f"scancel failed: {reason}", severity="error", timeout=15)
+            return
+        self.notify(f"Released job {job_id} on {self.cluster.name}.", title="Released")
+        self.refresh_snapshot()
 
     def action_toggle_nodes(self):
+        """Show Nodes by hardware in place of Partitions, or back."""
         partitions = self.tables["partitions"]
         hardware = self.tables["hardware"]
         showing = partitions.display
@@ -976,7 +1233,7 @@ class NodeStateApp(App):
     }
     DataTable:focus { border: round $border; border-title-color: $text; }
     #detail {
-        height: 10;
+        height: 12;
         border: round $border-blurred;
         border-title-color: $text-muted;
         padding: 0 1;
@@ -994,11 +1251,21 @@ class NodeStateApp(App):
     #whole-node { margin-bottom: 1; }
     #request-buttons { height: auto; align-horizontal: right; margin-top: 1; }
     #request-buttons Button { margin-left: 1; }
+    ConfirmScreen { align: center middle; }
+    #confirm-dialog {
+        width: 100;
+        height: auto;
+        border: round $warning;
+        background: $surface;
+        padding: 1 2;
+    }
+    #confirm-command { margin-bottom: 1; }
+    #confirm-buttons { height: auto; align-horizontal: right; margin-top: 1; }
+    #confirm-buttons Button { margin-left: 1; }
     """
     BINDINGS = [
         Binding("q", "quit", "Quit"),
-        Binding("right_square_bracket", "switch_cluster(1)", "Next cluster"),
-        Binding("left_square_bracket", "switch_cluster(-1)", "Previous cluster"),
+        Binding("M", "toggle_mail", "Email"),
         Binding("question_mark", "toggle_help", "Keys"),
     ]
 
@@ -1007,6 +1274,12 @@ class NodeStateApp(App):
         self.clusters = clusters
         self.settings = settings
         self.theme = "tokyo-night"
+        # The hourly email, while it is on: its server, its timer, when the
+        # next one goes out and why the last one failed (None if it did not).
+        self.smtp = None
+        self.mail_timer = None
+        self.mail_next = None
+        self.mail_error = None
 
     def compose(self) -> ComposeResult:
         with TabbedContent(id="clusters"):
@@ -1048,18 +1321,108 @@ class NodeStateApp(App):
             self.view.activate()
 
     def check_action(self, action, parameters):
-        """Keep the request dialog from switching clusters under itself.
+        """Keep a dialog from starting another job action under itself.
 
         Textual's own app actions (moving focus with Tab, the command palette)
         must keep working in the dialog.
         """
-        if action == "switch_cluster":
-            return not isinstance(self.screen, RequestScreen)
+        if action in ("submit", "release_job"):
+            return not isinstance(self.screen, (RequestScreen, ConfirmScreen))
         return True
 
-    def action_switch_cluster(self, step):
-        index = self.views.index(self.view)
-        self.tabs.active = f"cluster-{(index + step) % len(self.views)}"
+    def action_submit(self):
+        """Submit from the visible tab, as its Submit label does when clicked."""
+        self.view.action_submit()
+
+    def action_toggle_command(self):
+        """Switch the visible tab's probes between sbatch and srun (a click on
+        the command under Start estimates)."""
+        self.view.action_toggle_command()
+
+    def action_toggle_nodes(self):
+        """Switch the visible tab between Partitions and Nodes by hardware (a
+        click on either title)."""
+        self.view.action_toggle_nodes()
+
+    def action_next_scope(self):
+        """Probe the visible tab with its next account/QOS (a click on the
+        estimates' title)."""
+        self.view.action_next_scope()
+
+    def action_copy_command(self, command):
+        """Copy a command from the details (a click on its Copy)."""
+        self.copy_to_clipboard(command)
+        self.notify(command, title="Copied")
+
+    def action_release_job(self, job_id):
+        """Release a job of the visible tab (a click on Release in its details)."""
+        self.view.release_job(job_id)
+
+    def action_toggle_mail(self):
+        """Start the hourly email, reading `[smtp]` from the config, or stop it."""
+        if self.mail_timer is not None:
+            self.mail_timer.stop()
+            self.mail_timer = self.mail_next = self.mail_error = None
+            self.notify("Hourly email off.")
+            self.update_status()
+            return
+        try:
+            self.smtp = profiles.load_smtp()
+        except ValueError as error:
+            self.notify(f"config: {error}", severity="error")
+            return
+        if self.smtp is None:
+            self.notify(
+                "Add an [smtp] table to config.toml to email hourly.",
+                severity="warning",
+            )
+            return
+        self.mail_timer = self.set_interval(mailer.INTERVAL, self.send_mail)
+        self.notify(f"Emailing {self.smtp.recipient} now and hourly until you quit.")
+        self.send_mail()
+
+    def send_mail(self):
+        """Email the clusters shown so far: this one and any remote tab opened.
+
+        Hidden tabs that were never opened are not contacted.
+        """
+        interval = datetime.timedelta(seconds=mailer.INTERVAL)
+        self.mail_next = datetime.datetime.now() + interval
+        targets = [
+            (view.cluster, view.settings)
+            for view in self.views
+            if view.host.ssh is None or view.snap is not None
+        ]
+        self.mail_report(self.smtp, targets)
+        self.update_status()
+
+    @work(thread=True, exclusive=True, group="mail")
+    def mail_report(self, smtp, targets):
+        try:
+            mailer.send_report(targets, smtp)
+        except OSError as error:
+            self.call_from_thread(self.mailed, smtp, str(error) or repr(error))
+        else:
+            self.call_from_thread(self.mailed, smtp, None)
+
+    def mailed(self, smtp, error):
+        if self.mail_timer is None:
+            return
+        self.mail_error = error
+        if error is None:
+            self.notify(f"Emailed {smtp.recipient}.")
+        else:
+            self.notify(f"Could not email {smtp.recipient}: {error}", severity="error")
+        self.update_status()
+
+    def mail_status(self):
+        """The status line's note on the hourly email; empty while it is off."""
+        if self.mail_next is None:
+            return Text()
+        note = Text(f" · next email {self.mail_next:%H:%M}")
+        if self.mail_error is not None:
+            note.append(" (last failed)", style="red")
+        return note
 
     def action_toggle_help(self):
         if self.screen.query("HelpPanel"):

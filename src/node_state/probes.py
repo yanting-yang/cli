@@ -18,7 +18,9 @@ DEFAULT_WALLTIMES = (60, 1440)
 MAX_DERIVED_WALLTIMES = 6
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
-# Noise every site's replies share; profiles add their own submit-filter text.
+REPLY_PREFIX = re.compile(r"^(?:sbatch|srun): (?:error: )?")
+# Noise every site's replies share. Site banners are learned instead, from
+# the lines accepted replies print too (`Grid.banner`).
 GENERIC_NOISE = (
     r"\b(?:sbatch|srun): (?:error: )?",
     r"[-=]{8,}",
@@ -32,6 +34,9 @@ class Request:
     count: int = 0
     # How to show the GPU type; the full type still goes into --gres.
     name: str | None = dataclasses.field(default=None, compare=False)
+    # Ask for every CPU and all the memory of the node, as GPU requests do
+    # where GPUs are only allocated by node (`gpu_counts = "whole_node"`).
+    whole_node: bool = False
 
     @property
     def label(self):
@@ -52,15 +57,19 @@ class Settings:
     extra: tuple[str, ...] = ()
     # Overrides the profile's or derived walltimes, in minutes.
     walltimes: tuple[int, ...] = ()
-    # Email for job notifications (`[mail]` in clusters.toml); None for none.
+    # Email for job notifications (`[mail]` in config.toml); None for none.
     mail_user: str | None = None
     mail_type: str = "BEGIN,END,FAIL"
     # Ask for whole nodes: every CPU, all memory and every GPU on the node.
     whole_node: bool = False
 
-    def resource_directives(self):
-        """CPU and memory options: the request's, or a whole node's."""
-        if self.whole_node:
+    def resource_directives(self, whole_node=False):
+        """CPU and memory options: the request's, or a whole node's.
+
+        `whole_node` asks for the whole node for one request even when the
+        request itself does not.
+        """
+        if self.whole_node or whole_node:
             # --exclusive gives the job every CPU; --mem=0 all the memory.
             return ["--exclusive", "--mem=0"]
         # -c is --cpus-per-task, kept short for copying.
@@ -82,7 +91,14 @@ class Result:
     start: datetime.datetime | None
     partition: str | None
     message: str
+    # The command to submit the request: no --test-only, with any email;
+    # `run` is the same command as arguments, which Submit runs.
     command: str
+    run: tuple[str, ...] = ()
+    # The probe as it ran (minimal: no email) and its reply, which a
+    # rejection's message is cleaned from again once more banner is known.
+    probe: str = ""
+    output: str = dataclasses.field(default="", repr=False)
 
     @property
     def ok(self):
@@ -100,6 +116,17 @@ class Grid:
     # The cluster user's login shell, for `srun --pty` run commands.
     shell: str = "bash"
     results: dict = dataclasses.field(default_factory=dict)
+    # Lines accepted replies print too: a site's banner or notes on every
+    # submission (RCL's storage policy, Fir's memory units), which
+    # `clean_message` leaves out of reasons. Grids of one cluster may share it.
+    banner: set = dataclasses.field(default_factory=set)
+
+    @property
+    def gpus_by_node(self):
+        """Whether GPU rows ask for whole nodes though the request does not."""
+        return not self.settings.whole_node and any(
+            request.whole_node for request in self.requests
+        )
 
     def skipped(self, column):
         return self.max_wall is not None and self.walltimes[column] > self.max_wall
@@ -112,19 +139,34 @@ class Grid:
             if not self.skipped(column)
         ]
 
-    def directives(self, row, column):
-        settings = self.settings
+    def request_directives(self, row, column):
+        """The cell's request: account/QOS, GPUs, CPUs and memory, walltime."""
+        request = self.requests[row]
         return [
-            "--test-only",
             *self.scope.directives(),
-            *self.requests[row].directives(),
-            *settings.resource_directives(),
+            *request.directives(),
+            *self.settings.resource_directives(request.whole_node),
             # -t is --time, kept short for copying.
             f"-t{slurm.format_duration(self.walltimes[column])}",
-            # Probed too, so the run command stays exactly the probed request;
-            # --test-only never creates a job, so no mail is sent.
-            *settings.mail_directives(),
-            *settings.extra,
+        ]
+
+    def probe_directives(self, row, column):
+        """The probe: the request and extra options under --test-only.
+
+        Only what the estimate depends on, so no email options.
+        """
+        return [
+            "--test-only",
+            *self.request_directives(row, column),
+            *self.settings.extra,
+        ]
+
+    def run_directives(self, row, column):
+        """The same request to submit, with the email options."""
+        return [
+            *self.request_directives(row, column),
+            *self.settings.mail_directives(),
+            *self.settings.extra,
         ]
 
 
@@ -195,10 +237,15 @@ def max_gpu_counts(capacities, limits):
 
 
 def plan_requests(capacities, ceilings, mode="pow2", names=None):
-    """Requests for each GPU type up to its ceiling, then CPU only."""
+    """Requests for each GPU type up to its ceiling, then CPU only.
+
+    In `whole_node` mode each GPU request asks for its whole node: all of its
+    GPUs, CPUs and memory.
+    """
     names = names or {}
+    whole_node = mode == "whole_node"
     requests = [
-        Request(gpu, count, names.get(gpu))
+        Request(gpu, count, names.get(gpu), whole_node)
         for gpu, capacity in capacities.items()
         for count in counts_for(ceilings.get(gpu, capacity), capacity, mode)
     ]
@@ -269,30 +316,69 @@ def build_grid(snap, scope, settings, profile, info):
     )
 
 
-def clean_message(text, noise=()):
-    """Strip colour codes, command prefixes, banners and site noise."""
-    text = ANSI_ESCAPE.sub("", text)
-    for pattern in (*noise, *GENERIC_NOISE):
+def reply_lines(text):
+    """A reply's lines, without colour codes, command prefixes or padding."""
+    lines = (
+        REPLY_PREFIX.sub("", line.strip()).strip()
+        for line in ANSI_ESCAPE.sub("", text).splitlines()
+    )
+    return [line for line in lines if line]
+
+
+def clean_message(text, banner=frozenset()):
+    """The reason in a rejection, without colour codes, prefixes or banners.
+
+    Lines in `banner` were printed by an accepted reply too, so they cannot
+    be the reason.
+    """
+    text = " ".join(line for line in reply_lines(text) if line not in banner)
+    for pattern in GENERIC_NOISE:
         text = re.sub(pattern, " ", text)
     return " ".join(text.split()).strip(" .") or "rejected without a reason"
 
 
-def make_result(grid, row, column, returncode, output, profile):
-    """Turn one probe's reply into a `Result` with its copyable command."""
+def learn_banner(grid, output):
+    """Add an accepted reply's lines to the banner and reclean the reasons.
+
+    Rejections that landed first get their banner lines removed now.
+    """
+    lines = {
+        line
+        for line in reply_lines(output)
+        if not slurm.SBATCH_START_PATTERN.search(line)
+    }
+    if lines <= grid.banner:
+        return
+    grid.banner |= lines
+    for cell, result in grid.results.items():
+        if not result.ok and result.output:
+            message = clean_message(result.output, grid.banner)
+            grid.results[cell] = dataclasses.replace(result, message=message)
+
+
+def make_result(grid, row, column, returncode, output):
+    """Turn one probe's reply into a `Result` with its probe and run commands."""
     command = grid.settings.command
+    output = output.strip()
     raw = slurm.parse_test_output(output, returncode, command)
     start = raw["start_time"]
+    run = slurm.run_command(command, grid.run_directives(row, column), grid.shell)
     return Result(
         start=datetime.datetime.fromisoformat(start) if start else None,
         partition=raw["partition"],
-        message="" if start else clean_message(raw["result"], profile.message_noise),
+        message="" if start else clean_message(output or raw["result"], grid.banner),
         command=slurm.format_run_command(
-            command, grid.directives(row, column), grid.shell
+            command, grid.run_directives(row, column), grid.shell
         ),
+        run=tuple(run),
+        probe=slurm.format_test_command(
+            command, grid.probe_directives(row, column), grid.shell
+        ),
+        output=output,
     )
 
 
-def run_grid(grid, profile, host, on_result=None, should_stop=lambda: False):
+def run_grid(grid, host, on_result=None, should_stop=lambda: False):
     """Run every probe in `grid` on `host`, reporting each result as it lands.
 
     `should_stop` is polled between results; once it returns True, probes not
@@ -301,14 +387,16 @@ def run_grid(grid, profile, host, on_result=None, should_stop=lambda: False):
     cells = grid.cells()
     commands = [
         slurm.test_command(
-            grid.settings.command, grid.directives(row, column), profile.srun_program
+            grid.settings.command, grid.probe_directives(row, column), grid.shell
         )
         for row, column in cells
     ]
 
     def landed(index, returncode, output):
         row, column = cells[index]
-        result = make_result(grid, row, column, returncode, output, profile)
+        result = make_result(grid, row, column, returncode, output)
+        if result.ok:
+            learn_banner(grid, output)
         grid.results[row, column] = result
         if on_result is not None:
             on_result(row, column, result)

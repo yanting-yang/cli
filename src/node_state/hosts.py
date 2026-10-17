@@ -5,6 +5,9 @@ start-up files, MFA-guarded sshd) while the Slurm commands themselves are
 quick, so a `Remote` runs a whole refresh in one session, and streams a whole
 probe grid through another. Sessions reuse an ssh control master, so a login
 that needs a password or MFA is needed once, not per command.
+
+Every command runs without the terminal, except `login`, which the
+dashboard calls under `App.suspend()`.
 """
 
 import os
@@ -59,6 +62,15 @@ class Local:
         """Return stdout, or None when the command is missing, fails or hangs."""
         code, stdout, _ = _run(args, timeout)
         return stdout if code == 0 else None
+
+    def act(self, args, timeout=60):
+        """Run a command that acts, such as `sbatch` or `scancel`:
+        (returncode, output).
+
+        The output has stdout and stderr together, so a rejection says why.
+        """
+        code, stdout, stderr = _run(args, timeout)
+        return code, _combined(stdout, stderr)
 
     def run_batch(self, commands, timeout=120):
         """Run commands in parallel; their stdout in order, None for failures."""
@@ -150,6 +162,18 @@ class Remote:
 
     def run(self, args, timeout=60):
         return self.run_batch([args], timeout)[0]
+
+    def act(self, args, timeout=60):
+        """`Local.act` on the cluster; raises `ConnectionLost` if ssh fails."""
+        script = (
+            f"{self._prelude()}{shlex.join(args)} </dev/null 2>&1; "
+            "printf '\\n\\036%s\\n' $?"
+        )
+        code, stdout, stderr = _run(self.ssh_command(script), timeout)
+        output, record, status = stdout.rpartition(RECORD)
+        if not record:
+            raise ConnectionLost(stderr.strip() or f"ssh exited with status {code}")
+        return int(status), output.strip()
 
     def run_batch(self, commands, timeout=120, login_path=False):
         """Run commands in parallel in one session; stdout in order, None on failure.

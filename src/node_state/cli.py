@@ -54,16 +54,17 @@ def connect(clusters):
 
 
 def main(argv=None):
-    # No options: clusters are detected and configured in clusters.toml, and
-    # the probe request is edited in the dashboard. Parsing still rejects
-    # stray arguments and serves --help.
+    # No options: clusters are detected and configured in config.toml, and
+    # the probe request and hourly email are set in the dashboard. Parsing
+    # still rejects stray arguments and serves --help.
     argparse.ArgumentParser(
         prog="node_state",
         description=(
             "Partitions, account/QOS limits and estimated start times for the "
             "Slurm cluster you are logged in to; clusters with an ssh host in "
-            "clusters.toml get a tab that connects when opened. Prints a text "
-            "report of this cluster when output is not a terminal."
+            "config.toml get a tab that connects when opened, and M emails the "
+            "dashboard hourly through [smtp]. Prints a text report of this "
+            "cluster when output is not a terminal."
         ),
     ).parse_args(argv)
 
@@ -71,11 +72,11 @@ def main(argv=None):
         clusters = find_clusters()
         mail = profiles.load_mail()
     except ValueError as error:
-        sys.exit(f"node_state: clusters.toml: {error}")
+        sys.exit(f"node_state: {profiles.config_path().name}: {error}")
     if not clusters:
         sys.exit(
             "node_state: Slurm is not available here ('scontrol' failed), and no "
-            "cluster in clusters.toml has an ssh host."
+            "cluster in config.toml has an ssh host."
         )
     settings = probes.Settings()
     if mail is not None:

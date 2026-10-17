@@ -99,6 +99,27 @@ class ReportTests(unittest.TestCase):
 
         self.assertIn("(sbatch --exclusive --mem=0, whole node)", output.getvalue())
 
+    def test_says_when_gpu_rows_ask_for_whole_nodes(self):
+        host = FakeHost(probe=fake_probe)
+        output = StringIO()
+        with redirect_stdout(output):
+            report.print_report(
+                snapshot.ClusterInfo("tamia", "25.05", "me", "login", None),
+                make_snapshot(),
+                profiles.Profile("tamia", gpu_counts="whole_node"),
+                probes.Settings(),
+                host,
+            )
+
+        text = output.getvalue()
+        self.assertIn("(sbatch -c4 --mem=32G, GPU rows by whole node)", text)
+        self.assertIn("GPU rows ask for --exclusive --mem=0 instead of -c/--mem.", text)
+        probes_run = [args for batch in host.streamed for args in batch]
+        gpu = next(args for args in probes_run if "--gres=gpu:l40s:4" in args)
+        self.assertEqual(
+            gpu[gpu.index("--gres=gpu:l40s:4") + 1 :][:2], ["--exclusive", "--mem=0"]
+        )
+
     def test_lists_partition_usage(self):
         text = self.render(make_snapshot())
 
@@ -125,6 +146,13 @@ class ReportTests(unittest.TestCase):
         self.assertRegex(normal, r"CPU only\s+\| now\s+\| 1-06:00:00")
         # Rejected at every walltime, so the request is named once.
         self.assertIn("  4x l40s: too big", normal)
+        self.assertIn(
+            "Probe, e.g.: sbatch --test-only --gres=gpu:l40s:1 -c4 --mem=32G "
+            '-t0-03:00:00 --wrap="sleep infinity"\n'
+            "Submit it with: sbatch --gres=gpu:l40s:1 -c4 --mem=32G -t0-03:00:00 "
+            '--wrap="sleep infinity"\n',
+            normal,
+        )
 
     def test_lists_jobs(self):
         job = {
@@ -185,6 +213,25 @@ class ReportsTests(unittest.TestCase):
         self.assertIn("me@login · here · Slurm 25", text)
         self.assertIn("=" * 80, text)
         self.assertIn("fir: cannot connect over ssh (fir): Permission denied", text)
+
+    def test_returns_the_snapshot_of_a_reported_cluster(self):
+        cluster = snapshot.Cluster("here", profiles.Profile("here"), FakeHost())
+        lost = snapshot.Cluster(
+            "fir", profiles.Profile("fir"), FakeHost(ssh="fir", lost="timed out")
+        )
+        snap = make_snapshot()
+
+        def detect(host):
+            host.run_batch([])  # raises for a lost connection, as detecting does
+            return snapshot.ClusterInfo("here", "25", "me", "login", None)
+
+        with (
+            patch.object(snapshot.ClusterInfo, "detect", side_effect=detect),
+            patch.object(snapshot.Collector, "collect", return_value=snap),
+            redirect_stdout(StringIO()),
+        ):
+            self.assertIs(report.print_cluster(cluster, probes.Settings()), snap)
+            self.assertIsNone(report.print_cluster(lost, probes.Settings()))
 
 
 if __name__ == "__main__":

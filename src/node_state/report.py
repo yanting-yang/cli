@@ -1,12 +1,19 @@
-"""Plain-text report: the TUI's panels printed once, for pipes and scripts."""
+"""Plain-text report: the TUI's panels printed once, for pipes and scripts.
+
+Everything prints to `out` (stdout by default), so the dashboard's hourly
+email can collect the same text.
+"""
 
 import datetime
 
 from . import hosts, probes, slurm, snapshot, views
 from .snapshot import Scope
 
+# Between the reports of two clusters.
+SEPARATOR = "=" * 80
 
-def print_table(columns, rows):
+
+def print_table(columns, rows, out=None):
     widths = [
         max([len(columns[index]), *(len(str(row[index])) for row in rows)])
         for index in range(len(columns))
@@ -15,16 +22,19 @@ def print_table(columns, rows):
     header = separator.join(
         column.ljust(width) for column, width in zip(columns, widths)
     )
-    print(header)
-    print("-" * len(header))
+    print(header, file=out)
+    print("-" * len(header), file=out)
     for row in rows:
         print(
-            separator.join(str(value).ljust(width) for value, width in zip(row, widths))
+            separator.join(
+                str(value).ljust(width) for value, width in zip(row, widths)
+            ),
+            file=out,
         )
-    print()
+    print(file=out)
 
 
-def print_partitions(snap):
+def print_partitions(snap, out=None):
     rows = [
         (
             summary["name"] + ("*" if summary["default"] else ""),
@@ -40,9 +50,9 @@ def print_partitions(snap):
         )
         for summary in snap.partitions
     ]
-    print("Partitions (* default):")
+    print("Partitions (* default):", file=out)
     if not rows:
-        print("none reported\n")
+        print("none reported\n", file=out)
         return
     print_table(
         [
@@ -58,10 +68,11 @@ def print_partitions(snap):
             "Max time",
         ],
         rows,
+        out=out,
     )
 
 
-def print_hardware(snap):
+def print_hardware(snap, out=None):
     rows = [
         (
             group["label"],
@@ -77,17 +88,18 @@ def print_hardware(snap):
         )
         for group in snap.hardware
     ]
-    print("Nodes by hardware (free/total; CPUs exclude reserved cores):")
+    print("Nodes by hardware (free/total; CPUs exclude reserved cores):", file=out)
     print_table(
         ["Hardware", "Nodes", "States", "CPUs free", "Mem free (GB)", "GPUs free"],
         rows,
+        out=out,
     )
 
 
-def print_scopes(snap, user):
-    print("Accounts & QOS (* used when omitted; ∞ no cap, ? unknown):")
+def print_scopes(snap, user, out=None):
+    print("Accounts & QOS (* used when omitted; ∞ no cap, ? unknown):", file=out)
     if not snap.scopes:
-        print("none found\n")
+        print("none found\n", file=out)
         return
     rows = []
     for scope in snap.scopes:
@@ -104,27 +116,32 @@ def print_scopes(snap, user):
             )
         )
     print_table(
-        ["Account", "QOS", "Running/cap", "Pending", "GPU cap", "Wall cap", "FS"], rows
+        ["Account", "QOS", "Running/cap", "Pending", "GPU cap", "Wall cap", "FS"],
+        rows,
+        out=out,
     )
     for scope in snap.scopes:
         rows = views.limit_rows(snap.limits(scope, user))
-        print(f"Limits for {scope.label}:")
+        print(f"Limits for {scope.label}:", file=out)
         if rows:
-            print_table(["Scope", "Limit", "Max", "Used"], rows)
+            print_table(["Scope", "Limit", "Max", "Used"], rows, out=out)
         else:
-            print("none found\n")
+            print("none found\n", file=out)
 
 
-def print_grid(grid, now):
+def print_grid(grid, now, out=None):
     settings = grid.settings
     request = settings.describe()
     if settings.whole_node:
         request += ", whole node"
+    if grid.gpus_by_node:
+        request += ", GPU rows by whole node"
     if settings.mail_user:
         request += f", email {settings.mail_user} on {settings.mail_type}"
     print(
         f"Start estimates for {grid.scope.label} ({request}), "
-        f"waits from {now:%Y-%m-%d %H:%M}:"
+        f"waits from {now:%Y-%m-%d %H:%M}:",
+        file=out,
     )
     rows = [
         (
@@ -136,27 +153,34 @@ def print_grid(grid, now):
         )
         for row, request in enumerate(grid.requests)
     ]
-    print_table(["Request", *(slurm.format_duration(m) for m in grid.walltimes)], rows)
+    print_table(
+        ["Request", *(slurm.format_duration(m) for m in grid.walltimes)], rows, out=out
+    )
     if grid.max_wall is not None and any(
         grid.skipped(column) for column in range(len(grid.walltimes))
     ):
         print(
             f"'-' is over the {slurm.format_duration(grid.max_wall)} wall-time cap; "
-            "not probed."
+            "not probed.",
+            file=out,
         )
 
-    print_reasons(grid)
+    print_reasons(grid, out=out)
 
     example = next(
         (result for _, result in sorted(grid.results.items()) if result.ok), None
     )
     if example is not None:
-        print(f"Example: {example.command}")
-        print("Drop --test-only to submit; other cells differ only in --gres and -t.")
-    print()
+        print(f"Probe, e.g.: {example.probe}", file=out)
+        print(f"Submit it with: {example.command}", file=out)
+        differ = "Other cells differ only in --gres and -t"
+        if grid.gpus_by_node:
+            differ += "; GPU rows ask for --exclusive --mem=0 instead of -c/--mem"
+        print(f"{differ}.", file=out)
+    print(file=out)
 
 
-def print_reasons(grid):
+def print_reasons(grid, out=None):
     """List each rejection reason once, with the requests it applies to.
 
     A request rejected at every probed walltime is named alone; otherwise
@@ -169,7 +193,7 @@ def print_reasons(grid):
             reasons.setdefault(result.message, {}).setdefault(row, []).append(column)
     if not reasons:
         return
-    print("Cannot run:")
+    print("Cannot run:", file=out)
     for message, rows in reasons.items():
         labels = []
         for row, columns in rows.items():
@@ -180,16 +204,16 @@ def print_reasons(grid):
                 )
                 label += f" at {walltimes}"
             labels.append(label)
-        print(f"  {'; '.join(labels)}: {message}")
+        print(f"  {'; '.join(labels)}: {message}", file=out)
 
 
-def print_jobs(snap):
-    print("My jobs:")
+def print_jobs(snap, out=None):
+    print("My jobs:", file=out)
     if snap.jobs is None:
-        print("squeue failed\n")
+        print("squeue failed\n", file=out)
         return
     if not snap.jobs:
-        print("none\n")
+        print("none\n", file=out)
         return
     print_table(
         [
@@ -204,40 +228,53 @@ def print_jobs(snap):
             "Reason",
         ],
         [views.job_row(job) for job in snap.jobs],
+        out=out,
     )
 
 
-def print_report(info, snap, profile, settings, host):
+def print_report(info, snap, profile, settings, host, out=None):
     where = f" (via ssh {info.ssh})" if info.ssh else ""
     print(
         f"{info.user}@{info.hostname} · {info.name or 'unknown cluster'}{where} · "
-        f"Slurm {info.version} · {snap.taken_at:%Y-%m-%d %H:%M:%S}"
+        f"Slurm {info.version} · {snap.taken_at:%Y-%m-%d %H:%M:%S}",
+        file=out,
     )
     for note in snap.notes:
-        print(f"Note: {note}")
-    print()
-    print_partitions(snap)
-    print_hardware(snap)
-    print_scopes(snap, info.user)
+        print(f"Note: {note}", file=out)
+    print(file=out)
+    print_partitions(snap, out=out)
+    print_hardware(snap, out=out)
+    print_scopes(snap, info.user, out=out)
+    # Banner lines learned by one scope's probes also clean the next's reasons.
+    banner = set()
     for scope in snap.scopes or [Scope()]:
         grid = probes.build_grid(snap, scope, settings, profile, info)
-        probes.run_grid(grid, profile, host)
-        print_grid(grid, datetime.datetime.now())
-    print_jobs(snap)
+        grid.banner = banner
+        probes.run_grid(grid, host)
+        print_grid(grid, datetime.datetime.now(), out=out)
+    print_jobs(snap, out=out)
 
 
-def print_reports(clusters, settings):
+def print_cluster(cluster, settings, out=None):
+    """Print one cluster's report; return its snapshot, or None if unreachable."""
+    try:
+        info = snapshot.ClusterInfo.detect(cluster.host)
+        snap = snapshot.Collector(info, cluster.host).collect()
+        print_report(info, snap, cluster.profile, settings, cluster.host, out=out)
+        return snap
+    except hosts.ConnectionLost as error:
+        print(
+            f"{cluster.name}: cannot connect over ssh ({cluster.host.ssh}): {error}",
+            file=out,
+        )
+        print(file=out)
+        return None
+
+
+def print_reports(clusters, settings, out=None):
     """One report per cluster, in order; an unreachable cluster says why."""
     for index, cluster in enumerate(clusters):
         if index:
-            print("=" * 80)
-            print()
-        try:
-            info = snapshot.ClusterInfo.detect(cluster.host)
-            snap = snapshot.Collector(info, cluster.host).collect()
-            print_report(info, snap, cluster.profile, settings, cluster.host)
-        except hosts.ConnectionLost as error:
-            print(
-                f"{cluster.name}: cannot connect over ssh ({cluster.host.ssh}): {error}"
-            )
-            print()
+            print(SEPARATOR, file=out)
+            print(file=out)
+        print_cluster(cluster, settings, out=out)

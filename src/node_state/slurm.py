@@ -346,6 +346,25 @@ def job_counts(jobs, qos=None):
     }
 
 
+def sacct_command(ids):
+    """`sacct` for how jobs that left the queue ended, one line per job."""
+    fields = "JobID,State,ExitCode"
+    return ["sacct", "-n", "-X", "-P", "-j", ",".join(ids), "-o", fields]
+
+
+def parse_sacct_states(output):
+    """Map job ids to (state, exit code) from `sacct_command` output.
+
+    `CANCELLED by 1234` keeps only the state.
+    """
+    states = {}
+    for line in output.splitlines():
+        fields = line.split("|")
+        if len(fields) == 3 and fields[0] and fields[1].strip():
+            states[fields[0]] = (fields[1].split()[0], fields[2])
+    return states
+
+
 # --- Accounting ----------------------------------------------------------------
 
 
@@ -693,28 +712,51 @@ def assoc_mgr_command(accounts=None, qos=None):
 # --- Scheduling probes ---------------------------------------------------------
 
 
-def format_run_command(command, directives, shell=None):
-    """Format a probed batch-allocation or interactive-shell request for copying.
+def run_command(command, directives, shell=None):
+    """The command that submits a request: an `sbatch` job holding the
+    allocation with `SBATCH_WRAP`, or an interactive shell with `srun`.
 
-    `--test-only` stays in, so the command repeats the probe; drop it to submit.
+    `test_command` probes the same request with `--test-only`.
     """
-    arguments = [command, *directives]
     if command == "srun":
-        return shlex.join([*arguments, "--pty", shell or login_shell()])
+        return ["srun", *directives, "--pty", shell or login_shell()]
+    return ["sbatch", *directives, f"--wrap={SBATCH_WRAP}"]
+
+
+def format_run_command(command, directives, shell=None):
+    """`run_command` as one line for copying."""
+    if command == "srun":
+        return shlex.join(run_command(command, directives, shell))
     # Double quotes are safe because SBATCH_WRAP has no shell metacharacters.
-    return f'{shlex.join(arguments)} --wrap="{SBATCH_WRAP}"'
+    return f'{shlex.join(["sbatch", *directives])} --wrap="{SBATCH_WRAP}"'
 
 
-def test_command(command, directives, program=()):
+SUBMITTED_PATTERN = re.compile(r"\bSubmitted batch job (\d+)")
+
+
+def parse_submitted(output):
+    """The job id in sbatch's "Submitted batch job N", or None."""
+    match = SUBMITTED_PATTERN.search(output)
+    return match.group(1) if match else None
+
+
+def test_command(command, directives, shell=None):
     """The `--test-only` probe for `directives` with sbatch or srun.
 
-    sbatch wraps the same placeholder program as `format_run_command`, so no
-    batch script is needed. srun gets `program` for sites whose submit filter
-    only routes an srun request that names one.
+    Each names the program its `format_run_command` runs: sbatch wraps the
+    same placeholder, so no batch script is needed, and srun runs the login
+    shell. Some submit filters (Tamia's) only route an srun that names one.
     """
     if command == "srun":
-        return ["srun", *directives, *program]
+        return ["srun", *directives, shell or login_shell()]
     return ["sbatch", *directives, f"--wrap={SBATCH_WRAP}"]
+
+
+def format_test_command(command, directives, shell=None):
+    """`test_command` as one line, quoted like `format_run_command`."""
+    if command == "srun":
+        return shlex.join(test_command(command, directives, shell))
+    return f'{shlex.join(["sbatch", *directives])} --wrap="{SBATCH_WRAP}"'
 
 
 def parse_test_output(output, returncode, command):

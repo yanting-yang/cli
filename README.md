@@ -1,9 +1,10 @@
 # cli
 
-Slurm cluster inspection utilities. Currently one command, `node_state`: a terminal
-dashboard, in the spirit of [slurmtop](https://github.com/hunoutl/slurmtop) and
+Slurm cluster inspection utilities. `node_state` is a terminal dashboard, in the spirit
+of [slurmtop](https://github.com/hunoutl/slurmtop) and
 [slmtop](https://github.com/dawnmy/slmtop), that answers "where can I run, under which
-account/QOS, and when would it start?"
+account/QOS, and when would it start?", and can email you that report every hour while
+it runs.
 
 ```
  killarney  fir  tamia
@@ -53,16 +54,19 @@ uv run node_state > report.txt   # text report of this cluster when not a termin
 
 There are no options. The first tab is the cluster you are logged in to (from
 `ClusterName` in `scontrol show config`), and it is the only one checked at startup.
-Every cluster with an `ssh` host in [`clusters.toml`](clusters.toml) (Fir and Tamia
-here) gets a tab too, but is only contacted, over ssh, once you open its tab (click it,
-or `]`/`[`). Every probe starts as 4 CPUs and 32 GB at each partition time limit with
-`sbatch`; change a tab's request with `e` (CPUs, memory, walltimes, extra `sbatch`
-options) and `m` (`sbatch`/`srun`). The visible tab refreshes every minute and
-re-probes every five.
+Every other cluster with an `ssh` host in the [config file](#configuration) (Fir,
+Killarney and Tamia) gets a tab too, but is only contacted, over ssh, once you open its
+tab (click it). Every probe starts as 4 CPUs and 32 GB at each partition
+time limit with `sbatch`; change a tab's request with `e` (CPUs, memory, walltimes,
+extra `sbatch` options), and click the command under Start estimates to switch between
+`sbatch` and `srun`. The visible tab refreshes every minute and re-probes every five.
+Press `M` to email the report every hour until you quit
+([Hourly email](#hourly-email)).
 
-Probes use `--test-only`, so no job is ever submitted and it is safe to run on a shared
-login node. Run it on the login node: on a compute node, such as inside an interactive
-job, `srun` probes fail with "Requested operation is presently disabled".
+Probes use `--test-only`, so nothing is submitted or cancelled until you confirm a
+Submit or Release (see below), and it is safe to run on a shared login node. Run it on
+the login node: on a compute node, such as inside an interactive job, `srun` probes fail
+with "Requested operation is presently disabled".
 
 ### Remote clusters
 
@@ -87,17 +91,20 @@ with its host as the prompt (`fir.alliancecan.ca$ sbatch ...`): run them there.
 
 | Key | Action |
 | --- | --- |
-| `]` / `[` | Next / previous cluster tab |
 | `1`–`4`, `Tab` | Focus Partitions, Accounts & QOS, Start estimates, My jobs |
 | arrows | Move; the Details panel follows the selection |
 | `Enter` (Accounts & QOS) | Probe with that account/QOS |
-| `a` | Probe with the next account/QOS |
 | `e` | Edit the probe request: whole node, CPUs, memory, walltimes, extra options such as `--partition` or `--constraint`, and the email address (blank for none) |
-| `m` | Switch between `sbatch` and `srun` probes |
-| `c` | Copy the selected estimate's command |
-| `n` | Toggle Partitions and Nodes by hardware |
 | `p` / `r` | Re-probe / refresh everything now |
+| click the Partitions title | Switch between Partitions and Nodes by hardware |
+| click the account/QOS above the estimates | Probe with the next account/QOS |
+| click the command under Start estimates | Switch between `sbatch` and `srun` probes |
+| click `Submit` in Details | Submit the selected `sbatch` request, after you confirm |
+| click a cluster tab | Show that cluster |
+| click `Copy` after a command in Details | Copy that command |
+| click `Release` in a job's Details | Release the job with `scancel`, after you confirm |
 | `l` | Log in to a remote cluster again (ssh asks for any password or MFA) |
+| `M` | Email the report now and every hour until you quit; press again to stop |
 | `?`, `Ctrl+P` | Key help, command palette (themes) |
 | `q` | Quit |
 
@@ -119,38 +126,66 @@ with its host as the prompt (`fir.alliancecan.ca$ sbatch ...`): run them there.
   `FS` is your fair-share factor. Details list every cap with its usage: QOS per user,
   per account, per job and per node, plus association limits on you and your account.
   `∞` means no cap, `?` unknown.
-- **Start estimates**: rows are request sizes (each GPU type up to the tightest GPU cap,
-  then CPU only), columns are walltimes. Each cell is how long until the scheduler
-  expects the job to start: `now`, a wait such as `0-10:54:00`, `no` when it cannot run
-  (Details gives the reason), or `-` above the account/QOS wall-time cap. The earliest
-  start in each row is underlined. Here a 1-day L40S job starts sooner than a 3-hour
-  one, because short jobs queue in the busier `b1` partition.
-- **Details** for an estimate shows the partition it would land in and the exact
-  command. Drop `--test-only` to submit it: `sbatch` holds the allocation with
-  `sleep infinity` until the time limit; open a shell in it with
-  `srun --jobid=<id> --overlap --pty $SHELL` and release it with `scancel <id>`.
+- **Start estimates** (titled with the account/QOS probed): rows are request sizes
+  (each GPU type up to the tightest GPU cap, then CPU only), columns are walltimes. Each
+  cell is how long until the scheduler expects the job to start: `now`, a wait such as
+  `0-10:54:00`, `no` when it cannot run (Details gives the reason), or `-` above the
+  account/QOS wall-time cap. The earliest start in each row is underlined. Here a 1-day
+  L40S job starts sooner than a 3-hour one, because short jobs queue in the busier `b1`
+  partition.
+- **Details** for an estimate shows the partition it would land in, the probe that
+  produced the estimate with the scheduler's reply, and the command to submit the same
+  request; click `Copy` after either to copy it. The probe has only what the estimate
+  depends on; the submit command drops `--test-only` and adds your email options.
   `--account`/`--qos` are left out when Slurm would pick them anyway.
-- **My jobs** lists your queued and running jobs: `Start` is when a job started, or when
+- **Submit**: click the `Submit` label in Details to run an `sbatch` command, after a
+  dialog shows it and asks you to confirm; the dialog starts on Cancel, so Enter or Esc
+  submits nothing. The job is submitted in the background (on the cluster's login node
+  for a remote tab), its id pops up, and My jobs refreshes; it holds the allocation with
+  `sleep infinity` until the time limit; its details in My jobs show the `scancel`
+  command that releases it. An `srun` command opens an interactive shell, so `Submit`
+  is not clickable for it: click `Copy` and run it in a terminal. A request the probe
+  was refused for is not submitted.
+- **My jobs** lists your queued and running jobs: `Partition` is where it runs or was
+  submitted to (several for some pending jobs), `Start` is when a job started, or when
   the scheduler expects a pending one to (`-` until it has planned it), `Nodes` is where
   it runs, or the nodes planned for a pending job (dimmed, as they can still change),
-  and `Reason` is why a pending job waits.
+  and `Reason` is why a pending job waits. A job's details show the command that
+  attaches a shell to it (`srun --jobid=<id> --overlap --pty <shell>`, once it runs)
+  and the one that releases it (`scancel <id>`), each with `Copy`. Clicking `Release`
+  runs `scancel` after a dialog asks you to confirm (Cancel is selected first): a
+  running job is killed and its allocation released, a pending one leaves the queue.
 
-## Other clusters
+## Configuration
+
+All settings live in one file, `config.toml` at the repository root: email (`[mail]`,
+`[smtp]`) and cluster profiles (`[clusters.<name>]`). Start from the shared template,
+which documents every setting:
+
+```bash
+cp config.example.toml config.toml && chmod 600 config.toml
+```
+
+`config.toml` is git-ignored, because it holds your SMTP password, so keep it private
+and out of commits. Without it, `node_state` reads
+[`config.example.toml`](config.example.toml), which has the cluster profiles but no
+email settings; that template is also what an installed copy (`uvx`) uses.
+
+### Other clusters
 
 Nothing is hardcoded per cluster: partitions, GPU types, time tiers, accounts and
-limits are read from Slurm. A profile records only what Slurm cannot report, in
-[`clusters.toml`](clusters.toml) at the repository root, keyed by the cluster name. It
-covers `rcl` (one 1-hour walltime, since it routes by GPU request, and its
-storage-policy banner), `fir` (reached over ssh; its memory-unit note) and `tamia`
-(reached over ssh; whole-node GPU requests, a 1-day cap, `srun` needing a program). To
-add a cluster, or a tab for one you are not logged in to, add a table there:
+limits are read from Slurm. A profile records only what Slurm cannot report, keyed by
+the cluster name. The template's profiles cover `rcl` (one 1-hour walltime, since it
+routes by GPU request), `fir` and `killarney` (reached over ssh) and `tamia` (reached
+over ssh; whole-node GPU requests and a 1-day cap). To add a cluster, or a tab for one
+you are not logged in to, add a table to your `config.toml` (and to
+`config.example.toml` if everyone needs it):
 
 ```toml
 [clusters.mycluster]          # the ClusterName from `scontrol show config`
 walltimes = ["0-03:00:00", "1-00:00:00"]
 gpu_counts = "all"            # "pow2" (1, 2, 4, ... default), "all" or "whole_node"
-srun_program = ["bash"]       # if srun probes fail with "No partition specified"
-message_noise = ['NOTE: .*?\.']   # regexes stripped from rejection reasons
+                              # (GPU jobs then take whole nodes: --exclusive --mem=0)
 ssh = "login.mycluster.org"   # a tab for it from anywhere; host or ~/.ssh/config alias
 ```
 
@@ -161,11 +196,15 @@ asks for `--exclusive --mem=0` (every CPU and all the memory) instead of `-c`/`-
 and the GPU rows are each type's full node, such as `8x h100` or `4x l40s`. Untick it
 to go back to the CPUs and memory in the editor.
 
+On clusters that only allocate GPUs by node (`gpu_counts = "whole_node"`, such as
+Tamia) the GPU rows always ask for the whole node this way, so a job that holds all of
+a node's GPUs also gets its CPUs and memory; the CPU-only row keeps the editor's
+values. The estimates panel then notes "GPUs by whole node".
+
 ### Email notifications
 
-The `[mail]` table in [`clusters.toml`](clusters.toml) adds `--mail-type` and
-`--mail-user` to every command, so a job you submit from one emails you when it
-starts, ends or fails:
+The `[mail]` table in `config.toml` adds `--mail-type` and `--mail-user` to every
+command, so a job you submit from one emails you when it starts, ends or fails:
 
 ```toml
 [mail]
@@ -173,9 +212,42 @@ user = "you@example.com"
 type = "BEGIN,END,FAIL"       # any of sbatch's --mail-type values
 ```
 
-The probes carry the options too, so each command is still exactly what was probed;
-`--test-only` never creates a job, so probing sends no mail. Remove the table to leave
-email out, or clear the address for a session with `e`.
+Only the commands to submit carry them: probes leave them out, since email does not
+change when a job would start. Remove the table to leave email out, or clear the
+address for a session with `e`.
+
+### Hourly email
+
+Press `M` in the dashboard to email the report now and every hour until you quit
+`node_state` (or press `M` again). Each email covers the cluster you are on and every
+remote tab you have opened, with each tab's current request. Every email has the subject
+`node_state` and replies to the first one, so your mail client keeps them in one
+conversation instead of separate emails. Each starts with your job counts and what
+happened since the previous email, followed by the text report:
+
+```
+killarney: 1 running, 2 pending. Since 14:00:
+  6284538 (wrap) started on kn021
+  6233018 (wrap) ended: TIMEOUT
+  6290112 (eval) submitted (Priority), expected to start 10-17 09:30
+```
+
+The server is read from `[smtp]` in `config.toml` when you press `M`:
+
+```toml
+[smtp]
+server = "mail.example.org"
+port = 587                       # STARTTLS; 465 for SSL
+sender = "you@example.org"       # also the login
+password = "..."
+recipient = "you@example.org"    # default: user in [mail]
+```
+
+The top bar shows when the next email goes out (`next email 16:37`), and marks it
+`(last failed)` if one could not be sent. The thread and the jobs last reported are kept
+in `~/.local/state/node_state/mail.json`, so the next run of the dashboard continues the
+same conversation; delete the file to start a new one. Gmail starts a new conversation
+after 100 emails, about every four days.
 
 ### When `sacctmgr` fails
 

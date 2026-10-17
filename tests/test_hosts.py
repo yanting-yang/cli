@@ -74,6 +74,14 @@ class LocalTests(unittest.TestCase):
         )
 
 
+class SubmitTests(unittest.TestCase):
+    @patch.object(hosts.subprocess, "run")
+    def test_returns_the_status_with_both_outputs(self, run):
+        run.return_value = completed("", "sbatch: error: no", returncode=1)
+
+        self.assertEqual(hosts.Local().act(["sbatch"]), (1, "sbatch: error: no"))
+
+
 class RemoteTests(unittest.TestCase):
     def remote(
         self, ssh_config="controlmaster auto\ncontrolpath /s/%C\ncontrolpersist 600\n"
@@ -157,6 +165,21 @@ class RemoteTests(unittest.TestCase):
         args, kwargs = run.call_args
         self.assertNotIn("BatchMode=yes", args[0])
         self.assertNotIn("stdin", kwargs)
+
+    @patch.object(hosts.subprocess, "run")
+    def test_submits_on_the_cluster(self, run):
+        run.return_value = completed("Submitted batch job 5\n\n\x1e0\n")
+        remote = self.remote()
+        remote.path = "/opt/slurm/bin"
+
+        self.assertEqual(remote.act(["sbatch", "-t1"]), (0, "Submitted batch job 5"))
+        script = shlex.split(run.call_args.args[0][-1])[2]
+        self.assertIn("PATH=/opt/slurm/bin; export PATH", script)
+        self.assertIn("sbatch -t1 </dev/null 2>&1", script)
+
+        run.return_value = completed(stderr="Connection closed.", returncode=255)
+        with self.assertRaisesRegex(hosts.ConnectionLost, "Connection closed"):
+            remote.act(["sbatch"])
 
     def popen(self, stdout, returncode=0, stderr=""):
         process = Mock(returncode=returncode)

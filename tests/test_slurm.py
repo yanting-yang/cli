@@ -568,11 +568,14 @@ class TestProbeTests(unittest.TestCase):
             ["sbatch", "--test-only", "--mem=32G", "--wrap=sleep infinity"],
         )
 
-    def test_appends_the_program_after_srun_directives(self):
+    def test_runs_the_login_shell_after_srun_directives(self):
+        # Tamia's submit filter only routes an srun that names a program.
         self.assertEqual(
-            slurm.test_command("srun", ["--test-only", "-t3:00:00"], ("bash",)),
-            ["srun", "--test-only", "-t3:00:00", "bash"],
+            slurm.test_command("srun", ["--test-only", "-t3:00:00"], "zsh"),
+            ["srun", "--test-only", "-t3:00:00", "zsh"],
         )
+        with patch.dict(slurm.os.environ, {"SHELL": "/bin/bash"}):
+            self.assertEqual(slurm.test_command("srun", [])[-1], "bash")
 
     def test_extracts_estimated_start_time_and_partition(self):
         result = slurm.parse_test_output(
@@ -633,27 +636,50 @@ class FormatRunCommandTests(unittest.TestCase):
 
     def test_wraps_sleep_infinity_for_sbatch_instead_of_a_script(self):
         command = slurm.format_run_command(
-            "sbatch", ["--test-only", "--gres=gpu:h100:2", "--time=3:00:00"]
+            "sbatch", ["--gres=gpu:h100:2", "--time=3:00:00"]
         )
 
         self.assertEqual(
-            command,
-            'sbatch --test-only --gres=gpu:h100:2 --time=3:00:00 --wrap="sleep infinity"',
+            command, 'sbatch --gres=gpu:h100:2 --time=3:00:00 --wrap="sleep infinity"'
         )
         self.assertNotIn("job.sh", command)
 
     def test_opens_an_interactive_shell_for_srun(self):
-        command = slurm.format_run_command(
-            "srun", ["--test-only", "--time=3:00:00"], shell="zsh"
-        )
+        command = slurm.format_run_command("srun", ["--time=3:00:00"], shell="zsh")
 
-        self.assertEqual(command, "srun --test-only --time=3:00:00 --pty zsh")
+        self.assertEqual(command, "srun --time=3:00:00 --pty zsh")
 
     def test_opens_the_callers_login_shell_by_default(self):
         with patch.dict(slurm.os.environ, {"SHELL": "/usr/bin/fish"}):
-            command = slurm.format_run_command("srun", ["--test-only"])
+            command = slurm.format_run_command("srun", [])
 
-        self.assertEqual(command, "srun --test-only --pty fish")
+        self.assertEqual(command, "srun --pty fish")
+
+    def test_submits_the_same_request_without_a_script(self):
+        self.assertEqual(
+            slurm.run_command("sbatch", ["-t3:00:00"]),
+            ["sbatch", "-t3:00:00", "--wrap=sleep infinity"],
+        )
+        self.assertEqual(
+            slurm.run_command("srun", ["-t3:00:00"], "zsh"),
+            ["srun", "-t3:00:00", "--pty", "zsh"],
+        )
+        self.assertEqual(
+            slurm.parse_submitted("Submitted batch job 6330123\n"), "6330123"
+        )
+        self.assertIsNone(slurm.parse_submitted("sbatch: error: no"))
+
+    def test_shows_each_probe_as_it_runs(self):
+        directives = ["--test-only", "-t3:00:00"]
+
+        self.assertEqual(
+            slurm.format_test_command("sbatch", directives),
+            'sbatch --test-only -t3:00:00 --wrap="sleep infinity"',
+        )
+        self.assertEqual(
+            slurm.format_test_command("srun", directives, "zsh"),
+            "srun --test-only -t3:00:00 zsh",
+        )
 
 
 class NodeAvailabilityTests(unittest.TestCase):
@@ -824,6 +850,22 @@ class JobTests(unittest.TestCase):
         )
         self.assertEqual(
             slurm.job_counts([], "normal"), {"running": 0, "pending": 0, "total": 0}
+        )
+
+    def test_reads_how_jobs_ended_from_sacct(self):
+        output = "101|COMPLETED|0:0\n102|CANCELLED by 3134|0:15\n103_2|FAILED|1:0\n\n"
+
+        self.assertEqual(
+            slurm.parse_sacct_states(output),
+            {
+                "101": ("COMPLETED", "0:0"),
+                "102": ("CANCELLED", "0:15"),
+                "103_2": ("FAILED", "1:0"),
+            },
+        )
+        self.assertEqual(
+            slurm.sacct_command(["101", "102"])[:6],
+            ["sacct", "-n", "-X", "-P", "-j", "101,102"],
         )
 
     def test_counts_pending_jobs_toward_every_partition_they_name(self):
